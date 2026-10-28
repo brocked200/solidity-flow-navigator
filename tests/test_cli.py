@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+import solidity_flow_navigator.cli as cli_module
 from solidity_flow_navigator.cli import (
     DEFAULT_PORT,
     SERVER_HOST,
@@ -398,6 +399,68 @@ def test_expand_all_flag_parses_true() -> None:
     parser = _build_parser()
     args = parser.parse_args(["--expand-all", "some/repo"])
     assert args.expand_all is True
+
+
+def test_export_json_flag_parses_path() -> None:
+    """Machine export is explicit and does not revive the retired --json flag."""
+    parser = _build_parser()
+    args = parser.parse_args(["--export-json", "artifact.json", "some/repo"])
+    assert args.export_json == "artifact.json"
+
+
+def test_export_json_flag_accepts_stdout_sentinel() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["--export-json", "-", "some/repo"])
+    assert args.export_json == "-"
+
+
+def test_export_json_main_writes_and_does_not_start_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    captured: dict[str, object] = {}
+    fake_cc = object()
+    fake_facts = object()
+    fake_flows = (object(),)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "compile_repo", lambda _path: fake_cc)
+    monkeypatch.setattr(
+        cli_module,
+        "extract_facts",
+        lambda cc, _path: fake_facts if cc is fake_cc else None,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "build_flows",
+        lambda facts, _scope: fake_flows if facts is fake_facts else (),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "build_machine_export",
+        lambda facts, flows, _scope, cc, **_kw: (
+            {"schema_version": 1}
+            if facts is fake_facts and flows is fake_flows and cc is fake_cc
+            else {}
+        ),
+    )
+
+    def fake_write(payload, destination):
+        captured.update(payload=payload, destination=destination)
+        return "abc123"
+
+    monkeypatch.setattr(cli_module, "write_machine_export", fake_write)
+    monkeypatch.setattr(
+        cli_module,
+        "_serve",
+        lambda *_a, **_kw: pytest.fail("export mode must not start Flask"),
+    )
+
+    result = cli_module.main(["--export-json", "out.json", "repo"])
+    assert result == 0
+    assert captured == {
+        "payload": {"schema_version": 1},
+        "destination": "out.json",
+    }
+    assert "exported sha256 abc123" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

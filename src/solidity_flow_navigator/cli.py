@@ -65,6 +65,7 @@ from .flow.config import (
     load_partial_scope_from_toml,
 )
 from .flow.scope import DEFAULT_SCOPE, Scope
+from .machine_export import build_machine_export, write_machine_export
 from .serve.app import create_app, run_server
 
 # The server always binds the loopback interface — there is no ``--host``
@@ -263,6 +264,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "root-only with click-to-expand."
         ),
     )
+    rendering_group.add_argument(
+        "--export-json",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write a deterministic schema-versioned analysis artifact and exit "
+            "without starting the server. Use '-' for stdout. The export "
+            "contains source/compiler/scope digests, bindings, Flows, and a "
+            "flat resolved/unresolved edge inventory."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Server: how the local server binds.
@@ -316,6 +328,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     flows = build_flows(facts, scope)
+
+    if args.export_json is not None:
+        payload = build_machine_export(
+            facts,
+            flows,
+            scope,
+            cc,
+            tool_version=_distribution_version(),
+        )
+        digest = write_machine_export(payload, args.export_json)
+        print(f"solflow: exported sha256 {digest}", file=sys.stderr)
+        return 0
 
     # The file the index Bindings panel Save control writes to (spec §13.2,
     # v0.18.0): the explicit --config path when given, else solflow.toml in the
