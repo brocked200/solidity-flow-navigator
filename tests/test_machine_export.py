@@ -17,6 +17,8 @@ from solidity_flow_navigator.flow.types import (
     Binding,
     Flow,
     FunctionNode,
+    SinkKind,
+    SinkNode,
     UnresolvedNode,
     UnresolvedReason,
 )
@@ -100,6 +102,13 @@ def _analysis(root: Path):
         call_site=loc,
         raw_kind="low_level",
         raw_subkind="call",
+        value_expression="amount",
+    )
+    sink = SinkNode(
+        kind=SinkKind.TRANSFER,
+        descriptor="transfer(recipient)",
+        call_site=loc,
+        value_expression="payout",
     )
     root_node = FunctionNode(
         canonical_name="A.f()",
@@ -116,7 +125,7 @@ def _analysis(root: Path):
         source_code=fn.source_code,
         source_location=loc,
         builtins_used=(),
-        children=(bound, unresolved),
+        children=(bound, unresolved, sink),
     )
     flow = Flow(
         entry_point_declarer_canonical_name="A.f()",
@@ -126,6 +135,8 @@ def _analysis(root: Path):
         root=root_node,
         unresolved_count=1,
         max_depth=1,
+        value_sink_count=2,
+        dynamic_dispatch_count=1,
     )
     facts = RepoFacts(
         repo_path=str(root),
@@ -157,12 +168,17 @@ def test_export_is_checkout_independent_and_complete(tmp_path: Path) -> None:
     assert one["sources"][0]["path"] == "src/A.sol"
     assert one["sources"][0]["newline"] == "crlf"
     assert one["summary"]["unresolved_nodes"] == 1
+    assert one["summary"]["value_sink_nodes"] == 2
+    assert one["summary"]["dynamic_dispatch_nodes"] == 1
     assert one["binding_assumptions"] == [{"interface": "IRunner", "contract": "Impl"}]
-    assert [edge["resolved"] for edge in one["edges"]] == [True, False]
+    assert [edge["resolved"] for edge in one["edges"]] == [True, False, True]
     assert one["edges"][0]["binding_assumption"] == {
         "interface_name": "IRunner",
         "contract_name": "Impl",
     }
+    assert one["edges"][1]["value_expression"] == "amount"
+    assert one["edges"][2]["sink_kind"] == "transfer"
+    assert one["edges"][2]["value_expression"] == "payout"
     assert "filename_absolute" not in json.dumps(one)
 
 

@@ -24,7 +24,7 @@ from crytic_compile import CryticCompile
 
 from .analysis.types import RepoFacts, SourceLocation
 from .flow.scope import Scope
-from .flow.types import ExternalNode, Flow, FunctionNode, UnresolvedNode
+from .flow.types import ExternalNode, Flow, FunctionNode, SinkNode, UnresolvedNode
 
 SCHEMA_VERSION = 1
 
@@ -71,6 +71,10 @@ def build_machine_export(
             "type_definitions": len(facts.type_defs),
             "entry_points": len(ordered_flows),
             "unresolved_nodes": sum(f.unresolved_count for f in ordered_flows),
+            "value_sink_nodes": sum(f.value_sink_count for f in ordered_flows),
+            "dynamic_dispatch_nodes": sum(
+                f.dynamic_dispatch_count for f in ordered_flows
+            ),
         },
         "binding_assumptions": scope_dict["interface_bindings"],
         "flows": flow_dicts,
@@ -293,6 +297,7 @@ def _walk_edges(
                         asdict(child.bound_via) if child.bound_via else None
                     ),
                     "call_site_line": child.call_site_line,
+                    "value_expression": child.call_value,
                 }
             )
             out.append(common)
@@ -305,6 +310,7 @@ def _walk_edges(
                     "descriptor": child.descriptor,
                     "raw_kind": child.raw_kind,
                     "raw_subkind": child.raw_subkind,
+                    "value_expression": child.value_expression,
                     "call_site": _sanitize(asdict(child.call_site), aliases),
                 }
             )
@@ -316,6 +322,20 @@ def _walk_edges(
                     "followed": False,
                     "target": child.target_canonical_name,
                     "source_path": child.source_path,
+                    "value_expression": child.value_expression,
+                    "call_site": _sanitize(asdict(child.call_site), aliases),
+                }
+            )
+            out.append(common)
+        elif isinstance(child, SinkNode):
+            common.update(
+                {
+                    "resolved": True,
+                    "followed": False,
+                    "terminal": True,
+                    "sink_kind": child.kind,
+                    "descriptor": child.descriptor,
+                    "value_expression": child.value_expression,
                     "call_site": _sanitize(asdict(child.call_site), aliases),
                 }
             )
