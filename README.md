@@ -16,6 +16,12 @@ The first job in any audit is reconstructing what actually happens when someone 
 > [!NOTE]
 > SolFlow is **not a vulnerability scanner**. It emits no findings and makes no security claims. It shows you the code's shape so you can find the problems faster.
 
+> [!IMPORTANT]
+> This fork adds audit-integrity hardening: byte-accurate CRLF source mappings,
+> explicit value/action sinks, orthogonal unresolved/value/dynamic metrics, and
+> a deterministic machine-readable export. These additions improve coverage
+> accounting; they do not turn a static call graph into an exploitability proof.
+
 ## Features
 
 - **One Flow per entry point.** The index lists every externally callable function, grouped by contract and split into mutating vs. read-only, with modifier/depth/unresolved badges. A filter narrows the list as you type, so protocols with hundreds of entry points stay navigable.
@@ -25,6 +31,9 @@ The first job in any audit is reconstructing what actually happens when someone 
 - **Light or dark.** A header toggle sets the palette to Auto (follows your OS), Light, or Dark. The choice is server-rendered, so there's no flash on load, and your preference never leaves the machine.
 - **Bookmarks & progress.** Bookmark the entry points and contracts you keep returning to; they collect in a *Bookmarked* section atop the index, and entry points you've already opened are tinted so you can see your progress. It's a first-party localhost cookie (no accounts, nothing leaves the machine) and works with JavaScript disabled.
 - **It never silently lies.** When a call target can't be resolved statically (an unbound interface, `addr.call(...)`, computed-target Yul), the node is explicitly marked unresolved, with the reason. No guessing, no silent omissions. The auditor's trust in a Flow's completeness within its declared scope is the load-bearing property.
+- **Value sinks are first-class.** Native-value `send`, `transfer`, contract creation, and value-bearing calls are surfaced separately from unresolved and dynamic-dispatch metrics, so `0 unresolved` is never presented as `0 money movement`.
+- **Byte-accurate source ranges.** Source-map byte offsets are resolved against the original source bytes, preserving correct bodies and call anchors for CRLF and multibyte UTF-8 files.
+- **Deterministic JSON artifacts.** `--export-json` emits content-addressed source/compiler/scope metadata, binding assumptions, Flow trees, and a flat edge inventory without starting Flask.
 - **Bind interfaces to implementations.** When a call exits through an interface (`IOracle(addr).price()`), pin the concrete contract that runs and SolFlow resolves into its body, at every call site across every Flow. Bind from any interface node or the **Bindings** panel on the index, then **Save** to `solflow.toml` so it persists. A bound edge stays badged as an asserted assumption, not a static proof.
 - **Scope you control.** Inline a dependency, stub a dense in-tree math library, or exclude test and mock contracts, via `solflow.toml` or CLI flags (see [Configuration](#configuration)).
 - **Local and private.** Analysis runs entirely on your machine and the server binds only to `127.0.0.1`. Code under NDA is never uploaded anywhere.
@@ -43,6 +52,12 @@ For the latest development build, install from git:
 
 ```bash
 pipx install git+https://github.com/norah1499/solidity-flow-navigator
+```
+
+Install this hardened fork directly from its pinned branch:
+
+```bash
+pipx install 'git+https://github.com/brocked200/solidity-flow-navigator@codex/hardened-audit-flows-20261028'
 ```
 
 Check your version with `solflow --version` and upgrade with `pipx upgrade solflow`. To uninstall, run `pipx uninstall solflow` (its bundled dependencies go with it); `solc-select` is a separate `pipx uninstall solc-select`.
@@ -68,6 +83,22 @@ solflow path/to/your/solidity/project
 
 Point it at the repository root, where Slither can resolve dependencies. SolFlow compiles the project, binds `127.0.0.1:8080` (or the next free port), prints the URL to open, and serves the Flows. Compilation goes through [crytic-compile](https://github.com/crytic/crytic-compile), so any build system it detects works (Foundry, Hardhat, Truffle, Brownie, plain solc); Foundry is what SolFlow is tested against.
 
+To create a deterministic artifact for an audit pipeline without starting the
+web server:
+
+```bash
+solflow --export-json artifacts/solflow.json path/to/project
+```
+
+The export contains source bodies. Treat it with the same confidentiality as
+the audited repository.
+
+> [!WARNING]
+> Compiling an untrusted project can execute its build configuration (for
+> example Hardhat JavaScript). Run unknown targets in a disposable,
+> network-blocked environment with secrets removed; the localhost-only UI does
+> not make the compilation step a sandbox.
+
 ## Configuration
 
 SolFlow runs with sensible defaults. By default it excludes common test and mock directories (`**/*.t.sol`, `**/test/**`, `**/tests/**`, `**/mocks/**`) and `*Mock*` contracts. Refine scope through a config file, CLI flags, or both. CLI flags override file values; file values override defaults.
@@ -83,6 +114,7 @@ Run `solflow --help` for the full reference, grouped into **Scope**, **Resolutio
 | `--inline-library NAME` | Recurse into a `lib/<NAME>/` dependency instead of stubbing it (repeatable) |
 | `--stub-path GLOB` | Stop at a terminal node for matching in-tree call targets, e.g. dense math libraries (repeatable) |
 | `--expand-all` | Open every Flow fully expanded, for a bird's-eye view |
+| `--export-json PATH` | Write canonical JSON and exit; use `-` for stdout |
 | `--port N` | Bind a specific port (the default auto-selects from 8080 upward) |
 | `--config PATH` | Use a config file other than `solflow.toml` in the working directory |
 | `--version` | Print the installed SolFlow version and exit |
