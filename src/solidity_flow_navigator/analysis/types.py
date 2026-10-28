@@ -15,9 +15,11 @@ from dataclasses import dataclass
 class SourceLocation:
     """Where a thing lives in the source.
 
-    Byte offsets, line numbers, and columns are taken verbatim from Slither's
-    ``source_mapping``. ``filename_absolute`` is the resolved absolute path on
-    disk; ``filename_relative`` is the path relative to the analyzed
+    Byte offsets and columns come from Slither's ``source_mapping``. Line
+    numbers are recomputed from the original source bytes when the file is
+    readable, because solc offsets count CRLF bytes while Python text loading
+    may normalize them to LF. ``filename_absolute`` is the resolved absolute
+    path on disk; ``filename_relative`` is the path relative to the analyzed
     repository root (``RepoFacts.repo_path``) — recomputed by Layer 1, NOT
     inherited from Slither's CWD-relative naming.
 

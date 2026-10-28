@@ -93,3 +93,62 @@ def test_distinct_same_name_contracts_in_different_files_both_survive(
         ("a/IERC20.sol", "IERC20"),
         ("b/IERC20.sol", "IERC20"),
     ]
+
+
+def test_crlf_mapping_uses_raw_utf8_bytes_for_content_and_lines(tmp_path) -> None:
+    """Solc offsets address raw UTF-8 bytes, including CR in CRLF files.
+
+    The unicode comment makes a byte offset differ from a Python character
+    offset as well, so this one fixture protects both sources of drift.
+    ``content`` and ``lines`` deliberately model the bad values Slither can
+    derive after universal-newline normalization.
+    """
+
+    source = (
+        "// π-prefixed source\r\n"
+        "contract C {\r\n"
+        "    function before() external {}\r\n"
+        "    function deposit() external {\r\n"
+        "        uint256 x = 1;\r\n"
+        "    }\r\n"
+        "}\r\n"
+    ).encode()
+    fragment = (
+        b"    function deposit() external {\r\n" b"        uint256 x = 1;\r\n" b"    }"
+    )
+    path = tmp_path / "C.sol"
+    path.write_bytes(source)
+
+    start = source.index(fragment)
+    sm = SimpleNamespace(
+        filename=SimpleNamespace(absolute=str(path)),
+        start=start,
+        length=len(fragment),
+        lines=(999,),
+        starting_column=5,
+        ending_column=6,
+        content="shifted normalized text",
+    )
+
+    assert slither_facts._source_content(sm) == fragment.decode()
+    location = slither_facts._source_location(sm, tmp_path)
+    assert location.start == start
+    assert location.length == len(fragment)
+    assert location.lines == (4, 5, 6)
+
+
+def test_source_mapping_falls_back_when_raw_file_is_unavailable(tmp_path) -> None:
+    """Compiler adapters with virtual sources keep the old Slither fields."""
+
+    sm = SimpleNamespace(
+        filename=SimpleNamespace(absolute=str(tmp_path / "virtual.sol")),
+        start=7,
+        length=3,
+        lines=(9,),
+        starting_column=2,
+        ending_column=4,
+        content="abc",
+    )
+
+    assert slither_facts._source_content(sm) == "abc"
+    assert slither_facts._source_location(sm, tmp_path).lines == (9,)

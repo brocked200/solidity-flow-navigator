@@ -6,6 +6,7 @@ Slither already computed (inheritance order, source mappings, source text,
 binding outcomes).
 """
 
+from functools import cache
 from pathlib import Path
 
 from crytic_compile import CryticCompile
@@ -188,7 +189,7 @@ def _build_function(
         returns=returns,
         modifier_names=modifier_names,
         source_location=_source_location(f.source_mapping, repo_root),
-        source_code=f.source_mapping.content or "",
+        source_code=_source_content(f.source_mapping),
         calls=calls,
         signature_type_canonical_names=signature_type_canonical_names,
     )
@@ -387,7 +388,7 @@ def _build_synthetic_getter(
         returns=(),
         modifier_names=(),
         source_location=_source_location(var.source_mapping, repo_root),
-        source_code=var.source_mapping.content or "",
+        source_code=_source_content(var.source_mapping),
         calls=(),
     )
 
@@ -513,7 +514,7 @@ def _struct_def(s: SlitherStructure, repo_root: Path) -> TypeDef:
         canonical_name=_user_type_key(s),
         name=s.name,
         source_location=_source_location(s.source_mapping, repo_root),
-        source_code=s.source_mapping.content or "",
+        source_code=_source_content(s.source_mapping),
         member_type_canonical_names=tuple(dict.fromkeys(members)),
     )
 
@@ -524,7 +525,7 @@ def _enum_def(e: SlitherEnum, repo_root: Path) -> TypeDef:
         canonical_name=_user_type_key(e),
         name=e.name,
         source_location=_source_location(e.source_mapping, repo_root),
-        source_code=e.source_mapping.content or "",
+        source_code=_source_content(e.source_mapping),
     )
 
 
@@ -534,13 +535,92 @@ def _udvt_def(a: TypeAlias, repo_root: Path) -> TypeDef:
         canonical_name=_user_type_key(a),
         name=a.name,
         source_location=_source_location(a.source_mapping, repo_root),
-        source_code=a.source_mapping.content or "",
+        source_code=_source_content(a.source_mapping),
     )
 
 
 # ---------------------------------------------------------------------------
 # Source mapping helpers
 # ---------------------------------------------------------------------------
+
+
+@cache
+def _read_source_bytes(filename_absolute: str) -> bytes:
+    """Return a source file's original bytes, preserving its line endings.
+
+    Solidity source-map offsets are UTF-8 byte offsets. Reading the source in
+    text mode first would normalize CRLF to LF and make every mapping after the
+    first Windows newline drift by one byte. Cache by absolute path because a
+    single file contributes many function, type, and call-site mappings.
+    """
+
+    return Path(filename_absolute).read_bytes()
+
+
+def _raw_source_slice(sm) -> bytes | None:
+    """Return the raw byte slice addressed by ``sm``, or None on fallback.
+
+    Some compiler adapters expose virtual sources whose reported absolute path
+    is not readable from disk. Those keep using Slither's ``content`` field; a
+    missing file must not turn an otherwise valid analysis into a failure.
+    """
+
+    try:
+        raw = _read_source_bytes(str(sm.filename.absolute))
+        start = int(sm.start)
+        length = int(sm.length)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    end = start + length
+    if start < 0 or length < 0 or end > len(raw):
+        return None
+    return raw[start:end]
+
+
+def _source_content(sm) -> str:
+    """Decode a source mapping from the original UTF-8 bytes.
+
+    Slither's ``source_mapping.content`` can be shifted for CRLF files because
+    Python universal-newline normalization changes the character buffer while
+    solc's offsets continue to address the raw bytes. Prefer a raw byte slice
+    and retain the old field as a fail-safe for virtual or non-UTF-8 sources.
+    """
+
+    fragment = _raw_source_slice(sm)
+    if fragment is not None:
+        try:
+            return fragment.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+    return sm.content or ""
+
+
+def _raw_source_lines(sm) -> tuple[int, ...] | None:
+    """Compute the 1-indexed lines covered by ``sm`` from raw bytes.
+
+    As with ``content``, Slither's derived ``lines`` can drift on CRLF input.
+    The last byte of a non-empty mapping is used because ``length`` is
+    end-exclusive; a trailing newline therefore remains attributed to the
+    declaration line rather than inventing an empty following line.
+    """
+
+    try:
+        raw = _read_source_bytes(str(sm.filename.absolute))
+        start = int(sm.start)
+        length = int(sm.length)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    end = start + length
+    if start < 0 or length < 0 or end > len(raw):
+        return None
+
+    first_line = raw.count(b"\n", 0, start) + 1
+    if length == 0:
+        return (first_line,)
+    last_line = raw.count(b"\n", 0, end - 1) + 1
+    return tuple(range(first_line, last_line + 1))
 
 
 def _source_location(sm, repo_root: Path) -> SourceLocation:
@@ -557,7 +637,7 @@ def _source_location(sm, repo_root: Path) -> SourceLocation:
         filename_relative=rel,
         start=sm.start,
         length=sm.length,
-        lines=tuple(sm.lines),
+        lines=_raw_source_lines(sm) or tuple(sm.lines),
         starting_column=sm.starting_column,
         ending_column=sm.ending_column,
     )
