@@ -564,20 +564,25 @@ def _udvt_def(a: TypeAlias, repo_root: Path) -> TypeDef:
 
 
 @cache
-def _read_source_bytes(filename_absolute: str) -> bytes:
-    """Return a source file's original bytes, preserving its line endings.
+def _read_compiler_source_bytes(filename_absolute: str) -> bytes:
+    """Return the UTF-8 bytes crytic-compile supplies to the compiler.
 
-    Solidity source-map offsets are UTF-8 byte offsets. Reading the source in
-    text mode first would normalize CRLF to LF and make every mapping after the
-    first Windows newline drift by one byte. Cache by absolute path because a
-    single file contributes many function, type, and call-site mappings.
+    Crytic's Python frontends read sources with universal-newline semantics
+    before constructing compiler input.  Solc offsets therefore address LF
+    bytes even when the file on disk uses CRLF (or legacy bare CR).  Slither's
+    ``content`` accessor can instead slice the original disk bytes with those
+    normalized offsets, which shifts every declaration after the first CRLF.
+
+    Normalize only newline bytes and keep all other UTF-8 bytes unchanged.
+    Cache by absolute path because one file contributes many mappings.
     """
 
-    return Path(filename_absolute).read_bytes()
+    raw = Path(filename_absolute).read_bytes()
+    return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
 
-def _raw_source_slice(sm) -> bytes | None:
-    """Return the raw byte slice addressed by ``sm``, or None on fallback.
+def _compiler_source_slice(sm) -> bytes | None:
+    """Return the compiler-input byte slice addressed by ``sm``.
 
     Some compiler adapters expose virtual sources whose reported absolute path
     is not readable from disk. Those keep using Slither's ``content`` field; a
@@ -585,28 +590,27 @@ def _raw_source_slice(sm) -> bytes | None:
     """
 
     try:
-        raw = _read_source_bytes(str(sm.filename.absolute))
+        source = _read_compiler_source_bytes(str(sm.filename.absolute))
         start = int(sm.start)
         length = int(sm.length)
     except (OSError, TypeError, ValueError):
         return None
 
     end = start + length
-    if start < 0 or length < 0 or end > len(raw):
+    if start < 0 or length < 0 or end > len(source):
         return None
-    return raw[start:end]
+    return source[start:end]
 
 
 def _source_content(sm) -> str:
-    """Decode a source mapping from the original UTF-8 bytes.
+    """Decode a mapping from the newline-normalized compiler input.
 
-    Slither's ``source_mapping.content`` can be shifted for CRLF files because
-    Python universal-newline normalization changes the character buffer while
-    solc's offsets continue to address the raw bytes. Prefer a raw byte slice
-    and retain the old field as a fail-safe for virtual or non-UTF-8 sources.
+    Slither's ``source_mapping.content`` can be shifted for CRLF files when it
+    applies compiler-input offsets to original disk bytes. Retain the old field
+    as a fail-safe for virtual or non-UTF-8 sources.
     """
 
-    fragment = _raw_source_slice(sm)
+    fragment = _compiler_source_slice(sm)
     if fragment is not None:
         try:
             return fragment.decode("utf-8")
@@ -615,8 +619,8 @@ def _source_content(sm) -> str:
     return sm.content or ""
 
 
-def _raw_source_lines(sm) -> tuple[int, ...] | None:
-    """Compute the 1-indexed lines covered by ``sm`` from raw bytes.
+def _compiler_source_lines(sm) -> tuple[int, ...] | None:
+    """Compute the 1-indexed lines covered by normalized compiler bytes.
 
     As with ``content``, Slither's derived ``lines`` can drift on CRLF input.
     The last byte of a non-empty mapping is used because ``length`` is
@@ -625,20 +629,20 @@ def _raw_source_lines(sm) -> tuple[int, ...] | None:
     """
 
     try:
-        raw = _read_source_bytes(str(sm.filename.absolute))
+        source = _read_compiler_source_bytes(str(sm.filename.absolute))
         start = int(sm.start)
         length = int(sm.length)
     except (OSError, TypeError, ValueError):
         return None
 
     end = start + length
-    if start < 0 or length < 0 or end > len(raw):
+    if start < 0 or length < 0 or end > len(source):
         return None
 
-    first_line = raw.count(b"\n", 0, start) + 1
+    first_line = source.count(b"\n", 0, start) + 1
     if length == 0:
         return (first_line,)
-    last_line = raw.count(b"\n", 0, end - 1) + 1
+    last_line = source.count(b"\n", 0, end - 1) + 1
     return tuple(range(first_line, last_line + 1))
 
 
@@ -656,7 +660,7 @@ def _source_location(sm, repo_root: Path) -> SourceLocation:
         filename_relative=rel,
         start=sm.start,
         length=sm.length,
-        lines=_raw_source_lines(sm) or tuple(sm.lines),
+        lines=_compiler_source_lines(sm) or tuple(sm.lines),
         starting_column=sm.starting_column,
         ending_column=sm.ending_column,
     )

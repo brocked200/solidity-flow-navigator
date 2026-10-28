@@ -16,9 +16,10 @@ class SourceLocation:
     """Where a thing lives in the source.
 
     Byte offsets and columns come from Slither's ``source_mapping``. Line
-    numbers are recomputed from the original source bytes when the file is
-    readable, because solc offsets count CRLF bytes while Python text loading
-    may normalize them to LF. ``filename_absolute`` is the resolved absolute
+    numbers are recomputed from the newline-normalized compiler-input bytes
+    when the file is readable, because crytic-compile normalizes CRLF before
+    invoking solc while Slither can slice original disk bytes.  The
+    ``filename_absolute`` field is the resolved absolute
     path on disk; ``filename_relative`` is the path relative to the analyzed
     repository root (``RepoFacts.repo_path``) — recomputed by Layer 1, NOT
     inherited from Slither's CWD-relative naming.
@@ -30,7 +31,7 @@ class SourceLocation:
 
     filename_absolute: str
     filename_relative: str  # relative to the analyzed repository root
-    start: int  # byte offset into the file (UTF-8)
+    start: int  # byte offset into compiler-input UTF-8 (newlines normalized)
     length: int  # bytes
     lines: tuple[int, ...]  # 1-indexed line numbers covered, in order
     starting_column: int

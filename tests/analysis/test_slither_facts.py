@@ -103,13 +103,13 @@ def test_distinct_same_name_contracts_in_different_files_both_survive(
     ]
 
 
-def test_crlf_mapping_uses_raw_utf8_bytes_for_content_and_lines(tmp_path) -> None:
-    """Solc offsets address raw UTF-8 bytes, including CR in CRLF files.
+def test_crlf_mapping_uses_compiler_normalized_bytes(tmp_path) -> None:
+    """Crytic/solc offsets address universal-newline-normalized UTF-8.
 
     The unicode comment makes a byte offset differ from a Python character
     offset as well, so this one fixture protects both sources of drift.
     ``content`` and ``lines`` deliberately model the bad values Slither can
-    derive after universal-newline normalization.
+    derive when it applies those offsets to original CRLF disk bytes.
     """
 
     source = (
@@ -121,13 +121,12 @@ def test_crlf_mapping_uses_raw_utf8_bytes_for_content_and_lines(tmp_path) -> Non
         "    }\r\n"
         "}\r\n"
     ).encode()
-    fragment = (
-        b"    function deposit() external {\r\n" b"        uint256 x = 1;\r\n" b"    }"
-    )
+    compiler_source = source.replace(b"\r\n", b"\n")
+    fragment = b"    function deposit() external {\n        uint256 x = 1;\n    }"
     path = tmp_path / "C.sol"
     path.write_bytes(source)
 
-    start = source.index(fragment)
+    start = compiler_source.index(fragment)
     sm = SimpleNamespace(
         filename=SimpleNamespace(absolute=str(path)),
         start=start,
