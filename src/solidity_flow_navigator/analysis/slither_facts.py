@@ -242,6 +242,7 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
             target_contract_name=None,
             is_resolved=False,
             source_location=_op_location(op, repo_root),
+            value_expression=_value_expression(op),
         )
     if isinstance(op, SolidityCall):
         sf_name = op.function.name if op.function is not None else None
@@ -263,6 +264,7 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
             target_contract_name=None,
             is_resolved=False,
             source_location=_op_location(op, repo_root),
+            value_expression=_value_expression(op),
         )
     if isinstance(op, Transfer):
         return CallEdge(
@@ -273,6 +275,7 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
             target_contract_name=None,
             is_resolved=False,
             source_location=_op_location(op, repo_root),
+            value_expression=_value_expression(op),
         )
     if isinstance(op, NewContract):
         # NewContract.contract_name is a Slither UserDefinedType, not a Python
@@ -286,6 +289,7 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
             target_contract_name=str(raw) if raw is not None else None,
             is_resolved=False,
             source_location=_op_location(op, repo_root),
+            value_expression=_value_expression(op),
         )
     return None
 
@@ -346,7 +350,22 @@ def _high_or_library_edge(op: HighLevelCall, repo_root: Path, *, kind: str) -> C
         target_contract_name=target_contract,
         is_resolved=target_fn is not None,
         source_location=_op_location(op, repo_root),
+        value_expression=_value_expression(op),
     )
+
+
+def _value_expression(op: Operation) -> str | None:
+    """Return Slither's native-value expression for a call, if present.
+
+    High/low-level calls, send/transfer and contract creation all expose a
+    ``call_value`` property in SlithIR.  We deliberately retain only its
+    stable textual form: this layer records facts and must not guess whether
+    a symbolic expression is zero or how much value reaches the runtime
+    target.
+    """
+
+    value = getattr(op, "call_value", None)
+    return str(value) if value is not None else None
 
 
 def _build_synthetic_getter(

@@ -220,7 +220,7 @@
             <h4 class="section-heading">Writes · {{ contract.mutating_count }}</h4>
             <ul class="entry-list">
               {% for ep in contract.mutating_entry_points %}
-              <li class="entry-row{{ ' viewed' if ep.url_id in viewed_ids }}" id="e-{{ ep.url_id | anchor_slug }}" data-kind="write" data-guarded="{{ '1' if ep.modifier_names else '0' }}" data-unresolved="{{ '1' if ep.unresolved_count > 0 else '0' }}" data-fn="{{ ep.function_full_name }}" data-depth="{{ ep.max_depth }}" data-nodes="{{ ep.node_count }}">
+              <li class="entry-row{{ ' viewed' if ep.url_id in viewed_ids }}" id="e-{{ ep.url_id | anchor_slug }}" data-kind="write" data-guarded="{{ '1' if ep.modifier_names else '0' }}" data-unresolved="{{ '1' if ep.unresolved_count > 0 else '0' }}" data-value-sinks="{{ ep.value_sink_count }}" data-dynamic="{{ ep.dynamic_dispatch_count }}" data-fn="{{ ep.function_full_name }}" data-depth="{{ ep.max_depth }}" data-nodes="{{ ep.node_count }}">
                 <span class="entry-caret" aria-hidden="true">▸</span>
                 {# v0.11.0 (spec §8.3): no Contract. prefix; modifier chips render on
                    Writes rows only (no chips = unprotected state-changing entry point). #}
@@ -240,6 +240,12 @@
                   {%- if ep.unresolved_count > 0 -%}
                     <span class="meta-unresolved" title="{{ ep.unresolved_count }} call(s) that couldn't be traced in this Flow — shown as red pills">{{ ep.unresolved_count }} unr</span>
                   {%- endif -%}
+                  {%- if ep.value_sink_count > 0 -%}
+                    <span class="meta-sink" title="{{ ep.value_sink_count }} native-value sink(s) in this Flow">{{ ep.value_sink_count }} value</span>
+                  {%- endif -%}
+                  {%- if ep.dynamic_dispatch_count > 0 -%}
+                    <span class="meta-dynamic" title="{{ ep.dynamic_dispatch_count }} dynamic dispatch site(s) in this Flow">{{ ep.dynamic_dispatch_count }} dyn</span>
+                  {%- endif -%}
                   <span class="meta-depth" title="max call depth {{ ep.max_depth }}">d{{ ep.max_depth }}</span>
                 </span>
               </li>
@@ -255,7 +261,7 @@
             </h4>
             <ul class="entry-list">
               {% for ep in contract.read_only_entry_points %}
-              <li class="entry-row{{ ' viewed' if ep.url_id in viewed_ids }}" id="e-{{ ep.url_id | anchor_slug }}" data-kind="read" data-guarded="0" data-unresolved="{{ '1' if ep.unresolved_count > 0 else '0' }}" data-fn="{{ ep.function_full_name }}" data-depth="{{ ep.max_depth }}" data-nodes="{{ ep.node_count }}">
+              <li class="entry-row{{ ' viewed' if ep.url_id in viewed_ids }}" id="e-{{ ep.url_id | anchor_slug }}" data-kind="read" data-guarded="0" data-unresolved="{{ '1' if ep.unresolved_count > 0 else '0' }}" data-value-sinks="{{ ep.value_sink_count }}" data-dynamic="{{ ep.dynamic_dispatch_count }}" data-fn="{{ ep.function_full_name }}" data-depth="{{ ep.max_depth }}" data-nodes="{{ ep.node_count }}">
                 <span class="entry-caret" aria-hidden="true">▸</span>
                 {# v0.11.0: Reads rows carry no modifier chips (deliberate §8.3
                    asymmetry) but share the entry-main wrapper. #}
@@ -271,6 +277,12 @@
                   {%- endif -%}
                   {%- if ep.unresolved_count > 0 -%}
                     <span class="meta-unresolved" title="{{ ep.unresolved_count }} call(s) that couldn't be traced in this Flow — shown as red pills">{{ ep.unresolved_count }} unr</span>
+                  {%- endif -%}
+                  {%- if ep.value_sink_count > 0 -%}
+                    <span class="meta-sink" title="{{ ep.value_sink_count }} native-value sink(s) in this Flow">{{ ep.value_sink_count }} value</span>
+                  {%- endif -%}
+                  {%- if ep.dynamic_dispatch_count > 0 -%}
+                    <span class="meta-dynamic" title="{{ ep.dynamic_dispatch_count }} dynamic dispatch site(s) in this Flow">{{ ep.dynamic_dispatch_count }} dyn</span>
                   {%- endif -%}
                   <span class="meta-depth" title="max call depth {{ ep.max_depth }}">d{{ ep.max_depth }}</span>
                 </span>

@@ -110,6 +110,11 @@ class CallEdge:
     target_contract_name: str | None
     is_resolved: bool  # see docstring above for meaning per-kind
     source_location: SourceLocation  # location of the call site (statement-level)
+    # Native-value expression attached to the call, when Slither exposes one.
+    # Kept as source-adjacent display text rather than an interpreted amount:
+    # the expression may be a local variable or an SSA temporary.  Defaulted
+    # so existing synthetic fixtures and downstream callers remain compatible.
+    value_expression: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

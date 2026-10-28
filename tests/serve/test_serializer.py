@@ -21,6 +21,8 @@ from solidity_flow_navigator.flow.types import (
     Binding,
     Flow,
     FunctionNode,
+    SinkKind,
+    SinkNode,
     UnresolvedNode,
     UnresolvedReason,
 )
@@ -168,6 +170,35 @@ def test_interface_with_no_candidates_gets_no_control() -> None:
     ctx = {"candidates": {"IFoo": ()}, "bound": {"IFoo": None}}
     d = serialize_flow(flow, ctx)
     assert "binding" not in d["root"]["children"][0]
+
+
+def test_sink_node_and_surface_metrics_round_trip() -> None:
+    sink = SinkNode(
+        kind=SinkKind.TRANSFER,
+        descriptor="<address>.transfer(...) value:amount",
+        call_site=_SL,
+        value_expression="amount",
+    )
+    flow = Flow(
+        entry_point_declarer_canonical_name="C.f()",
+        entry_point_invoker_canonical_name="C.f()",
+        entry_point_contract_name="C",
+        entry_point_function_name="f",
+        root=_fn(children=(sink,)),
+        unresolved_count=0,
+        max_depth=1,
+        value_sink_count=1,
+        dynamic_dispatch_count=0,
+    )
+    data = serialize_flow(flow)
+    assert data["value_sink_count"] == 1
+    assert data["dynamic_dispatch_count"] == 0
+    child = data["root"]["children"][0]
+    assert child["node_type"] == "sink"
+    assert child["kind"] == "transfer"
+    assert child["value_expression"] == "amount"
+    assert child["call_site_line"] == 1
+    assert "source_html" not in child
 
 
 def test_top_level_shape(solmate_flows: tuple[Flow, ...]) -> None:

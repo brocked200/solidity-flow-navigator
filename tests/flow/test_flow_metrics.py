@@ -11,12 +11,17 @@ constructed by ``build_flows`` now carries them).
 """
 
 from solidity_flow_navigator.analysis.types import SourceLocation
-from solidity_flow_navigator.flow.builder import _summarize_subtree
+from solidity_flow_navigator.flow.builder import (
+    _security_surface_counts,
+    _summarize_subtree,
+)
 from solidity_flow_navigator.flow.types import (
     ExternalNode,
     Flow,
     FlowNode,
     FunctionNode,
+    SinkKind,
+    SinkNode,
     UnresolvedNode,
     UnresolvedReason,
 )
@@ -34,7 +39,12 @@ def _sl(filename_relative: str = "src/Foo.sol") -> SourceLocation:
     )
 
 
-def _fn(name: str, children: tuple[FlowNode, ...] = ()) -> FunctionNode:
+def _fn(
+    name: str,
+    children: tuple[FlowNode, ...] = (),
+    *,
+    call_value: str | None = None,
+) -> FunctionNode:
     """Construct a minimal FunctionNode for tree-shape tests."""
     return FunctionNode(
         canonical_name=f"C.{name}()",
@@ -52,6 +62,7 @@ def _fn(name: str, children: tuple[FlowNode, ...] = ()) -> FunctionNode:
         source_location=_sl(),
         builtins_used=(),
         children=children,
+        call_value=call_value,
     )
 
 
@@ -72,6 +83,26 @@ def _ext() -> ExternalNode:
         target_contract_name="Lib",
         source_path="lib/widget/Lib.sol",
         call_site=_sl(),
+    )
+
+
+def _sink(kind: SinkKind = SinkKind.TRANSFER) -> SinkNode:
+    return SinkNode(
+        kind=kind,
+        descriptor=f"<address>.{kind.value}(...)",
+        call_site=_sl(),
+        value_expression="amount" if kind is not SinkKind.NEW_CONTRACT else None,
+    )
+
+
+def _dynamic(*, value: str | None = None) -> UnresolvedNode:
+    return UnresolvedNode(
+        reason=UnresolvedReason.LOW_LEVEL_CALL,
+        descriptor="<address>.call(...)",
+        call_site=_sl(),
+        raw_kind="low_level",
+        raw_subkind="call",
+        value_expression=value,
     )
 
 
@@ -130,6 +161,39 @@ def test_external_descendants_do_not_count_as_unresolved() -> None:
     ``unresolved_count``."""
     flow = _wrap(_fn("entry", children=(_ext(), _ext(), _ext())))
     assert flow.unresolved_count == 0
+
+
+def test_security_surface_metrics_are_orthogonal_to_unresolved() -> None:
+    """Known terminal value sinks do not inflate unresolved; an opaque
+    value-carrying low-level call contributes to all applicable surfaces."""
+
+    root = _fn(
+        "entry",
+        children=(
+            _sink(SinkKind.TRANSFER),
+            _sink(SinkKind.SEND),
+            _sink(SinkKind.NEW_CONTRACT),
+            _dynamic(value="msg.value"),
+            _fn("typedValueCall", call_value="amount"),
+        ),
+    )
+
+    unresolved, _ = _summarize_subtree(root)
+    values, dynamic = _security_surface_counts(root)
+    assert unresolved == 1
+    # transfer + send + low-level call value + resolved typed call value.
+    assert values == 4
+    assert dynamic == 1
+
+
+def test_new_contract_with_value_is_counted_as_value_sink() -> None:
+    sink = SinkNode(
+        kind=SinkKind.NEW_CONTRACT,
+        descriptor="new Child(...)",
+        call_site=_sl(),
+        value_expression="seed",
+    )
+    assert _security_surface_counts(sink) == (1, 0)
 
 
 # ---------------------------------------------------------------------------

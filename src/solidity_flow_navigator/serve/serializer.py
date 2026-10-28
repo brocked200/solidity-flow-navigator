@@ -8,7 +8,7 @@ at request time keeps a single shape between the static template render
 
 The conversion is structurally ``dataclasses.asdict`` plus one extra field:
 each ``FunctionNode`` gains a ``source_html`` key holding Pygments output.
-Other node variants (``UnresolvedNode``, ``ExternalNode``) round-trip
+Other node variants (``UnresolvedNode``, ``ExternalNode``, ``SinkNode``) round-trip
 unchanged.
 
 The output dicts are JSON-serializable (StrEnum values become their string
@@ -27,6 +27,7 @@ from ..flow.types import (
     Flow,
     FlowNode,
     FunctionNode,
+    SinkNode,
     UnresolvedNode,
     UnresolvedReason,
 )
@@ -58,6 +59,8 @@ def serialize_flow(
         "entry_point_function_name": flow.entry_point_function_name,
         "signature_suffix": signature_suffix,
         "unresolved_count": flow.unresolved_count,
+        "value_sink_count": flow.value_sink_count,
+        "dynamic_dispatch_count": flow.dynamic_dispatch_count,
         "max_depth": flow.max_depth,
         "root": _serialize_node(flow.root, bindings_ctx),
     }
@@ -96,7 +99,7 @@ def _serialize_node(
         d["children"] = [_serialize_node(c, bindings_ctx) for c in node.children]
     else:
         d = asdict(node)
-        if isinstance(node, (UnresolvedNode, ExternalNode)):
+        if isinstance(node, (UnresolvedNode, ExternalNode, SinkNode)):
             d["call_site_line"] = (
                 node.call_site.lines[0] if node.call_site.lines else None
             )

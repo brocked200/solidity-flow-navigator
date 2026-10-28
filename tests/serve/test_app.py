@@ -335,6 +335,8 @@ def test_build_index_returns_total_unresolved(
             ):
                 saw_one = True
                 assert ep.unresolved_count >= 0
+                assert ep.value_sink_count >= 0
+                assert ep.dynamic_dispatch_count >= 0
                 assert ep.max_depth >= 0
     assert saw_one
 
@@ -369,6 +371,8 @@ def test_build_index_entry_metadata_matches_source_flow(
             ):
                 src = by_url_id[ep.url_id]
                 assert ep.unresolved_count == src.unresolved_count
+                assert ep.value_sink_count == src.value_sink_count
+                assert ep.dynamic_dispatch_count == src.dynamic_dispatch_count
                 assert ep.max_depth == src.max_depth
                 saw_one = True
     assert saw_one

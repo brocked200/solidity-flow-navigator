@@ -17,6 +17,14 @@ from solidity_flow_navigator.analysis import slither_facts
 from solidity_flow_navigator.analysis.types import RepoFacts
 
 
+def test_value_expression_preserves_symbolic_text() -> None:
+    assert (
+        slither_facts._value_expression(SimpleNamespace(call_value="amount * 2"))
+        == "amount * 2"
+    )
+    assert slither_facts._value_expression(SimpleNamespace(call_value=None)) is None
+
+
 def _source_mapping(absolute: str) -> SimpleNamespace:
     """The attribute subset of a Slither source mapping ``_source_location`` reads."""
 

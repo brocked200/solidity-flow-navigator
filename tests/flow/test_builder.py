@@ -31,6 +31,8 @@ from solidity_flow_navigator.flow.types import (
     Flow,
     FlowNode,
     FunctionNode,
+    SinkKind,
+    SinkNode,
     UnresolvedNode,
     UnresolvedReason,
 )
@@ -222,10 +224,70 @@ def test_binding_resolves_interface_call_into_concrete_impl() -> None:
 def test_no_binding_leaves_interface_call_unbound() -> None:
     facts = _binding_facts()
     flows = build_flows(facts, Scope())  # no bindings
-    node = _flow_by_entry_point(flows, "Vault", "poke()").root.children[0]
-    assert isinstance(node, FunctionNode)
-    assert node.bound_via is None
-    assert node.declarer_contract_name == "IStrategy"
+    flow = _flow_by_entry_point(flows, "Vault", "poke()")
+    node = flow.root.children[0]
+    assert isinstance(node, UnresolvedNode)
+    assert node.reason is UnresolvedReason.INTERFACE_CALL_NO_BINDING
+    assert node.descriptor == "IStrategy.run(...)"
+    assert flow.unresolved_count == 1
+
+
+def test_terminal_sinks_are_explicit_nodes_with_value_metrics() -> None:
+    """send/transfer/new are visible terminal nodes, not folded builtins."""
+
+    edges = tuple(
+        CallEdge(
+            kind=kind,
+            subkind=None,
+            target_canonical_name=None,
+            target_function_name=None,
+            target_contract_name="Child" if kind == "new_contract" else None,
+            is_resolved=False,
+            source_location=_bsl(),
+            value_expression="amount" if kind != "new_contract" else "seed",
+        )
+        for kind in ("send", "transfer", "new_contract")
+    )
+    entry = _bfunc("Vault", "pay()", is_entry_point=True, calls=edges)
+    vault = _bcontract("Vault", functions=(entry,))
+    facts = RepoFacts(repo_path="/abs", contracts=(vault,), free_functions=())
+
+    flow = _flow_by_entry_point(build_flows(facts, Scope()), "Vault", "pay()")
+    assert [type(node) for node in flow.root.children] == [SinkNode] * 3
+    assert [node.kind for node in flow.root.children] == [
+        SinkKind.SEND,
+        SinkKind.TRANSFER,
+        SinkKind.NEW_CONTRACT,
+    ]
+    assert flow.root.builtins_used == ()
+    assert flow.unresolved_count == 0
+    assert flow.value_sink_count == 3
+    assert flow.dynamic_dispatch_count == 0
+
+
+def test_low_level_value_call_is_unresolved_dynamic_and_value_sink() -> None:
+    edge = CallEdge(
+        kind="low_level",
+        subkind="call",
+        target_canonical_name=None,
+        target_function_name="call",
+        target_contract_name=None,
+        is_resolved=False,
+        source_location=_bsl(),
+        value_expression="msg.value",
+    )
+    entry = _bfunc("Vault", "poke()", is_entry_point=True, calls=(edge,))
+    vault = _bcontract("Vault", functions=(entry,))
+    facts = RepoFacts(repo_path="/abs", contracts=(vault,), free_functions=())
+
+    flow = _flow_by_entry_point(build_flows(facts, Scope()), "Vault", "poke()")
+    node = flow.root.children[0]
+    assert isinstance(node, UnresolvedNode)
+    assert node.reason is UnresolvedReason.LOW_LEVEL_CALL
+    assert node.value_expression == "msg.value"
+    assert flow.unresolved_count == 1
+    assert flow.value_sink_count == 1
+    assert flow.dynamic_dispatch_count == 1
 
 
 def test_binding_to_missing_contract_is_failed_node() -> None:

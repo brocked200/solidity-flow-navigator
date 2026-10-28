@@ -105,6 +105,8 @@ class _EntryPointEntry:
     # ``max_depth``: longest edge-distance from root to any leaf; the
     # template renders ``dN`` unconditionally.
     unresolved_count: int
+    value_sink_count: int
+    dynamic_dispatch_count: int
     max_depth: int
     # v0.11.0 per-entry modifier chips (spec §8.3): names of the Flow root's
     # modifier children, in application order. Populated for every entry;
@@ -293,6 +295,8 @@ def build_index(
                     function_full_name=full_name,
                     signature_html=sig_html,
                     unresolved_count=flow.unresolved_count,
+                    value_sink_count=flow.value_sink_count,
+                    dynamic_dispatch_count=flow.dynamic_dispatch_count,
                     max_depth=flow.max_depth,
                     modifier_names=_root_modifier_names(flow),
                     node_count=node_count,

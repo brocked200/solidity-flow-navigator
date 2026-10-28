@@ -38,6 +38,8 @@ from .types import (
     Flow,
     FlowNode,
     FunctionNode,
+    SinkKind,
+    SinkNode,
     UnresolvedNode,
     UnresolvedReason,
 )
@@ -314,6 +316,9 @@ class _FlowBuilder:
                 signature_type_roots=self._signature_type_roots(entry_func),
             )
             unresolved_count, max_depth = _summarize_subtree(root_node)
+            value_sink_count, dynamic_dispatch_count = _security_surface_counts(
+                root_node
+            )
             return Flow(
                 entry_point_declarer_canonical_name=entry_func.canonical_name,
                 entry_point_invoker_canonical_name=(
@@ -324,6 +329,8 @@ class _FlowBuilder:
                 root=root_node,
                 unresolved_count=unresolved_count,
                 max_depth=max_depth,
+                value_sink_count=value_sink_count,
+                dynamic_dispatch_count=dynamic_dispatch_count,
             )
         finally:
             self._current_invoker_contract = prev_invoker
@@ -401,6 +408,7 @@ class _FlowBuilder:
         call_site_line: int | None = None,
         call_kind: str | None = None,
         bound_via: Binding | None = None,
+        call_value: str | None = None,
     ) -> FunctionNode:
         """Recursive node builder. Emits a terminal node (empty children) on cycle.
 
@@ -434,6 +442,7 @@ class _FlowBuilder:
                 call_site_line,
                 call_kind,
                 bound_via,
+                call_value,
             )
 
         new_path = path | {func.canonical_name}
@@ -462,6 +471,7 @@ class _FlowBuilder:
             call_site_line=call_site_line,
             call_kind=call_kind,
             bound_via=bound_via,
+            call_value=call_value,
             signature_types=self._resolve_signature_types(func),
             signature_type_roots=self._signature_type_roots(func),
         )
@@ -474,6 +484,7 @@ class _FlowBuilder:
         call_site_line: int | None = None,
         call_kind: str | None = None,
         bound_via: Binding | None = None,
+        call_value: str | None = None,
     ) -> FunctionNode:
         return FunctionNode(
             canonical_name=func.canonical_name,
@@ -494,6 +505,7 @@ class _FlowBuilder:
             call_site_line=call_site_line,
             call_kind=call_kind,
             bound_via=bound_via,
+            call_value=call_value,
             signature_types=self._resolve_signature_types(func),
             signature_type_roots=self._signature_type_roots(func),
         )
@@ -682,6 +694,7 @@ class _FlowBuilder:
                 call_site=edge.source_location,
                 raw_kind=edge.kind,
                 raw_subkind=edge.subkind,
+                value_expression=edge.value_expression,
             )
         if kind == "solidity":
             if is_yul_dynamic_dispatch_subkind(edge.subkind):
@@ -691,14 +704,16 @@ class _FlowBuilder:
                     call_site=edge.source_location,
                     raw_kind=edge.kind,
                     raw_subkind=edge.subkind,
+                    value_expression=edge.value_expression,
                 )
             return edge.subkind if edge.subkind else "<solidity-builtin>"
         if kind in ("send", "transfer", "new_contract"):
-            # v0 simplification per §11.9 / §11.10: fold into builtins_used
-            # rather than emit a dedicated node type. The marker is the
-            # kind name itself; the parent function's source_code retains
-            # the actual expression for the auditor to read.
-            return kind
+            return SinkNode(
+                kind=SinkKind(kind),
+                descriptor=_describe_sink(edge),
+                call_site=edge.source_location,
+                value_expression=edge.value_expression,
+            )
         raise ValueError(f"unknown CallEdge.kind: {kind!r}")
 
     def _handle_internal_or_library(
@@ -877,6 +892,7 @@ class _FlowBuilder:
                 call_site=edge.source_location,
                 raw_kind=edge.kind,
                 raw_subkind=edge.subkind,
+                value_expression=edge.value_expression,
             )
         lexical_target = self._functions_by_canonical.get(edge.target_canonical_name)
         if lexical_target is None:
@@ -898,6 +914,7 @@ class _FlowBuilder:
                 call_site=edge.source_location,
                 raw_kind=edge.kind,
                 raw_subkind=edge.subkind,
+                value_expression=edge.value_expression,
             )
 
         # Interface call site (§13.2): Slither bound the call to an interface's
@@ -917,6 +934,14 @@ class _FlowBuilder:
             )
             if bound is not None:
                 return bound
+            return UnresolvedNode(
+                reason=UnresolvedReason.INTERFACE_CALL_NO_BINDING,
+                descriptor=_describe_high_level(edge),
+                call_site=edge.source_location,
+                raw_kind=edge.kind,
+                raw_subkind=edge.subkind,
+                value_expression=edge.value_expression,
+            )
 
         # Self-call virtual dispatch (§11.5). Triggered when the bound
         # target's contract IS the Flow's invoker. Cross-contract
@@ -963,6 +988,7 @@ class _FlowBuilder:
             path=path,
             call_site_line=_first_line_or_none(edge.source_location.lines),
             call_kind="internal" if is_self_call else "external",
+            call_value=edge.value_expression,
         )
 
     def _try_bind(
@@ -1013,6 +1039,7 @@ class _FlowBuilder:
                 call_site=edge.source_location,
                 raw_kind=edge.kind,
                 raw_subkind=edge.subkind,
+                value_expression=edge.value_expression,
             )
 
         impl = self._resolve_bound_method(
@@ -1031,6 +1058,7 @@ class _FlowBuilder:
                 call_site=edge.source_location,
                 raw_kind=edge.kind,
                 raw_subkind=edge.subkind,
+                value_expression=edge.value_expression,
             )
 
         prev_invoker = self._current_invoker_contract
@@ -1043,6 +1071,7 @@ class _FlowBuilder:
                 call_site_line=_first_line_or_none(edge.source_location.lines),
                 call_kind="external",
                 bound_via=binding,
+                call_value=edge.value_expression,
             )
         finally:
             self._current_invoker_contract = prev_invoker
@@ -1085,6 +1114,7 @@ class _FlowBuilder:
             target_contract_name=target.contract_declarer_name or None,
             source_path=target.source_location.filename_relative,
             call_site=edge.source_location,
+            value_expression=edge.value_expression,
         )
 
     def _is_super_internal_call(
@@ -1169,6 +1199,55 @@ def _summarize_subtree(root: FlowNode) -> tuple[int, int]:
     return (0, 0)
 
 
+def _security_surface_counts(root: FlowNode) -> tuple[int, int]:
+    """Return ``(value_sink_count, dynamic_dispatch_count)`` for ``root``.
+
+    The two counts are deliberately orthogonal to ``unresolved_count``.  A
+    statically resolved high-level call may still transfer native value, while
+    a delegatecall is dynamically dispatched even when it carries no value.
+    Interface/abstract resolution failures remain unresolved but are not
+    automatically classified as either surface.
+    """
+
+    value_count = 0
+    dynamic_count = 0
+
+    if isinstance(root, FunctionNode):
+        if root.call_value is not None:
+            value_count += 1
+        for child in root.children:
+            child_values, child_dynamic = _security_surface_counts(child)
+            value_count += child_values
+            dynamic_count += child_dynamic
+        return value_count, dynamic_count
+
+    if isinstance(root, SinkNode):
+        # send/transfer always move a native-value expression.  Contract
+        # creation only counts as a value sink when ``new C{value: ...}`` was
+        # used, but remains a visible SinkNode either way.
+        if root.kind in (SinkKind.SEND, SinkKind.TRANSFER) or (
+            root.kind is SinkKind.NEW_CONTRACT and root.value_expression is not None
+        ):
+            value_count += 1
+        return value_count, dynamic_count
+
+    if isinstance(root, UnresolvedNode):
+        if root.value_expression is not None:
+            value_count += 1
+        if root.reason in (
+            UnresolvedReason.LOW_LEVEL_CALL,
+            UnresolvedReason.YUL_DYNAMIC_DISPATCH,
+        ):
+            dynamic_count += 1
+        return value_count, dynamic_count
+
+    # ExternalNode: the body is intentionally stubbed, but a typed call may
+    # still carry native value and must remain visible in the metric.
+    if root.value_expression is not None:
+        value_count += 1
+    return value_count, dynamic_count
+
+
 def _edge_mapping_key(edge: CallEdge) -> tuple:
     """Finest-granularity source-mapping key for the v0.10.2 CFG-branch dedup
     in ``_FlowBuilder._process_calls``.
@@ -1210,6 +1289,8 @@ def _child_identity(node: FlowNode) -> tuple:
         return ("fn", node.canonical_name)
     if isinstance(node, ExternalNode):
         return ("ext", node.target_canonical_name)
+    if isinstance(node, SinkNode):
+        return ("sink", node.kind, node.descriptor, node.value_expression)
     return ("unr", node.raw_kind, node.raw_subkind, node.descriptor)
 
 
@@ -1227,6 +1308,18 @@ def _child_source_line_key(node: FlowNode) -> float:
         return node.call_site_line if node.call_site_line is not None else math.inf
     lines = node.call_site.lines
     return lines[0] if lines else math.inf
+
+
+def _describe_sink(edge: CallEdge) -> str:
+    """Human label for a terminal send/transfer/deployment operation."""
+
+    if edge.kind == "new_contract":
+        target = edge.target_contract_name or "<contract>"
+        return f"new {target}(...)"
+    value = (
+        f" value:{edge.value_expression}" if edge.value_expression is not None else ""
+    )
+    return f"<address>.{edge.kind}(...){value}"
 
 
 def _modifier_application_line(func: Function, modifier_name: str) -> int | None:
