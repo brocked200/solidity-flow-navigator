@@ -65,7 +65,8 @@ from .flow.config import (
     load_partial_scope_from_toml,
 )
 from .flow.scope import DEFAULT_SCOPE, Scope
-from .machine_export import build_machine_export, write_machine_export
+from .flow.types import UnresolvedReason
+from .machine_export import ExportError, build_machine_export, write_machine_export
 from .serve.app import create_app, run_server
 
 # The server always binds the loopback interface — there is no ``--host``
@@ -329,15 +330,45 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     flows = build_flows(facts, scope)
 
-    if args.export_json is not None:
-        payload = build_machine_export(
-            facts,
-            flows,
-            scope,
-            cc,
-            tool_version=_distribution_version(),
+    identities = [flow.entry_point_invoker_canonical_name for flow in flows]
+    if len(set(identities)) != len(identities):
+        print(
+            "solflow: duplicate entrypoint identities; exclude ambiguous "
+            "same-named contracts before serving or exporting.",
+            file=sys.stderr,
         )
-        digest = write_machine_export(payload, args.export_json)
+        return 1
+
+    pending = [flow.root for flow in flows]
+    failures: set[str] = set()
+    while pending:
+        node = pending.pop()
+        if getattr(node, "reason", None) == UnresolvedReason.INTERFACE_BINDING_FAILED:
+            failures.add(node.descriptor)
+        pending.extend(getattr(node, "children", ()))
+    if failures:
+        for failure in sorted(failures):
+            print(f"solflow: binding failed: {failure}", file=sys.stderr)
+        return 1
+
+    if args.export_json is not None:
+        print(
+            "solflow: warning: JSON export contains private source; "
+            "protect it like the target repository.",
+            file=sys.stderr,
+        )
+        try:
+            payload = build_machine_export(
+                facts,
+                flows,
+                scope,
+                cc,
+                tool_version=_distribution_version(),
+            )
+            digest = write_machine_export(payload, args.export_json)
+        except (ExportError, OSError) as exc:
+            print(f"solflow: export failed: {exc}", file=sys.stderr)
+            return 1
         print(f"solflow: exported sha256 {digest}", file=sys.stderr)
         return 0
 

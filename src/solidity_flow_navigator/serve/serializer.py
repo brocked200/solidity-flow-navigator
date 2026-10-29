@@ -19,7 +19,7 @@ transformation.
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from ..flow.types import (
@@ -89,7 +89,9 @@ def _serialize_node(
     Bindings panel, writing the same single global binding.
     """
     if isinstance(node, FunctionNode):
-        d = asdict(node)
+        # Descendants are serialized below. Converting them here as well
+        # copies a depth-N call chain N times before replacing the result.
+        d = asdict(replace(node, children=()))
         d["source_html"] = highlight_solidity(node.source_code)
         # Signature-type panel (spec §10.2): each struct/enum def carries its own
         # Pygments HTML, mirroring source_html. asdict already turned the TypeDefs

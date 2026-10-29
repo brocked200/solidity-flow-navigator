@@ -14,6 +14,7 @@ The fixtures pull from the session-scoped ``solmate_flows`` defined in
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 from solidity_flow_navigator.analysis.types import SourceLocation, TypeDef
@@ -199,6 +200,30 @@ def test_sink_node_and_surface_metrics_round_trip() -> None:
     assert child["value_expression"] == "amount"
     assert child["call_site_line"] == 1
     assert "source_html" not in child
+
+
+def test_deep_flow_serialization_copies_each_source_once() -> None:
+    """Long call chains must not repeatedly materialize every descendant."""
+
+    class CountedSource(str):
+        copies = 0
+
+        def __deepcopy__(self, memo):
+            type(self).copies += 1
+            return str(self)
+
+    depth = 30
+    source = CountedSource("function f() external {}")
+    node = _fn(source_code=source)
+    for _ in range(depth - 1):
+        node = _fn(source_code=source, children=(node,))
+    data = serialize_flow(replace(_binding_flow(), root=node))
+    assert CountedSource.copies <= depth
+    count = 0
+    while data["root"]["children"]:
+        count += 1
+        data["root"] = data["root"]["children"][0]
+    assert count == depth - 1
 
 
 def test_top_level_shape(solmate_flows: tuple[Flow, ...]) -> None:

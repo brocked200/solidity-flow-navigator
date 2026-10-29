@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 import re
 import urllib.parse
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from flask.testing import FlaskClient
@@ -45,6 +47,23 @@ from solidity_flow_navigator.serve.app import (
     build_index,
     create_app,
 )
+
+
+def test_duplicate_flow_identity_fails_before_route_overwrite(tmp_path: Path) -> None:
+    from tests.test_machine_export import _analysis
+
+    facts, flows, scope, _ = _analysis(tmp_path / "repo")
+    other_location = replace(
+        flows[0].root.source_location, filename_relative="Other.sol"
+    )
+    other = replace(
+        flows[0],
+        root=replace(
+            flows[0].root, source_location=other_location, source_code="different body"
+        ),
+    )
+    with pytest.raises(ValueError, match="ambiguous Flow identity"):
+        create_app(facts, (*flows, other), scope=scope)
 
 
 @pytest.fixture(scope="module")

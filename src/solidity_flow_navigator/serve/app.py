@@ -589,6 +589,9 @@ def create_app(
         nonlocal total_eps, total_contracts, total_unresolved
         nonlocal entry_by_url_id, contract_by_name
         these = prebuilt if prebuilt is not None else build_flows(facts, active_scope)
+        identities = [f.entry_point_invoker_canonical_name for f in these]
+        if len(identities) != len(set(identities)):
+            raise ValueError("ambiguous Flow identity: duplicate entry-point name")
         current_scope = active_scope
         flow_by_url_id = {f.entry_point_invoker_canonical_name: f for f in these}
         groups, total_eps, total_contracts, total_unresolved = build_index(facts, these)
