@@ -12,12 +12,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import sys
 import tempfile
 from collections.abc import Iterable
 from dataclasses import asdict
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from crytic_compile import CryticCompile
@@ -46,23 +45,36 @@ def build_machine_export(
     ordered_flows = tuple(
         sorted(flows, key=lambda f: f.entry_point_invoker_canonical_name)
     )
+    identities = [flow.entry_point_invoker_canonical_name for flow in ordered_flows]
+    if len(identities) != len(set(identities)):
+        raise ExportError("ambiguous Flow identity: duplicate entry-point name")
     aliases, sources = _source_manifest(facts, compilation)
     flow_dicts = [_sanitize(asdict(flow), aliases) for flow in ordered_flows]
     scope_dict = {
-        "exclude_paths": sorted(scope.exclude_paths),
-        "exclude_contracts": sorted(scope.exclude_contracts),
-        "inline_libraries": sorted(scope.inline_libraries),
-        "stub_paths": sorted(scope.stub_paths),
+        # Gitignore negation is order-sensitive. Canonical JSON orders keys,
+        # not configuration sequences: sorting these changes their meaning.
+        "exclude_paths": list(scope.exclude_paths),
+        "exclude_contracts": list(scope.exclude_contracts),
+        "inline_libraries": list(scope.inline_libraries),
+        "stub_paths": list(scope.stub_paths),
         "interface_bindings": [
             {"interface": iface, "contract": contract}
-            for iface, contract in sorted(scope.interface_bindings)
+            for iface, contract in sorted(dict(scope.interface_bindings).items())
         ],
     }
+    for key in ("exclude_paths", "exclude_contracts", "inline_libraries", "stub_paths"):
+        if any(
+            Path(p).is_absolute() or PureWindowsPath(p).is_absolute()
+            for p in scope_dict[key]
+        ):
+            raise ExportError("scope paths must be relative for a portable export")
     core: dict[str, Any] = {
         "tool": {"name": "solflow", "version": tool_version},
         "sources": sources,
         "source_tree_sha256": _digest_json(sources),
-        "compilers": _compiler_manifest(compilation, aliases),
+        "compilers": _compiler_manifest(
+            compilation, aliases, Path(facts.repo_path).resolve()
+        ),
         "scope": scope_dict,
         "scope_sha256": _digest_json(scope_dict),
         "summary": {
@@ -129,32 +141,57 @@ def _source_manifest(
             raw_paths.add(Path(filename.absolute).resolve())
 
     aliases: dict[str, str] = {}
-    entries: list[dict[str, Any]] = []
+    entries: dict[str, dict[str, Any]] = {}
+    cached_sources = {
+        str(Path(name).resolve()): text
+        for name, text in getattr(compilation, "src_content", {}).items()
+    }
+    compiler_inputs: dict[str, list[bytes]] = {}
+    for unit in compilation.compilation_units.values():
+        for name, data in getattr(unit, "_solflow_source_bytes", {}).items():
+            compiler_inputs.setdefault(str(Path(name).resolve()), []).append(data)
     for path in sorted(raw_paths, key=lambda p: str(p)):
         try:
             raw = path.read_bytes()
         except OSError as exc:
             raise ExportError(f"cannot read compiled source {path}: {exc}") from exc
         sha = hashlib.sha256(raw).hexdigest()
+        text = raw.decode("utf-8")
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        cached = cached_sources.get(str(path))
+        if cached is not None and cached not in (text, normalized):
+            raise ExportError("compiled source changed since analysis")
+        for compiler_input in compiler_inputs.get(str(path), ()):
+            expected = (
+                compiler_input.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+            )
+            if expected != normalized:
+                raise ExportError("compiler input differs from source on disk")
         try:
             alias = path.relative_to(repo_root).as_posix()
         except ValueError:
-            alias = f"external/{sha[:16]}/{path.name}"
-        if alias in aliases.values():
-            # Same relative name with different absolute sources is ambiguous.
-            # Content-address the later path rather than silently colliding.
             alias = f"external/{sha}/{path.name}"
+        if alias in entries and entries[alias]["sha256"] != sha:
+            raise ExportError(f"ambiguous compiled source alias: {alias}")
         aliases[str(path)] = alias
-        entries.append(
-            {
-                "path": alias,
-                "sha256": sha,
-                "bytes": len(raw),
-                "newline": _newline_style(raw),
-            }
-        )
-    entries.sort(key=lambda e: e["path"])
-    return aliases, entries
+        entries[alias] = {
+            "path": alias,
+            "sha256": sha,
+            "bytes": len(raw),
+            "newline": _newline_style(raw),
+        }
+    # Stub paths originate from SourceLocation.filename_relative, which can
+    # traverse outside the checkout. Resolve those labels using the same
+    # compiled-source identity as locations, without retaining host paths.
+    for loc in _fact_locations(facts):
+        alias = aliases[str(Path(loc.filename_absolute).resolve())]
+        previous = aliases.get(loc.filename_relative)
+        if previous is not None and previous != alias:
+            raise ExportError("ambiguous relative compiled source path")
+        aliases[loc.filename_relative] = alias
+    for alias in entries:
+        aliases.setdefault(alias, alias)
+    return aliases, sorted(entries.values(), key=lambda e: e["path"])
 
 
 def _fact_locations(facts: RepoFacts) -> Iterable[SourceLocation]:
@@ -175,69 +212,105 @@ def _fact_locations(facts: RepoFacts) -> Iterable[SourceLocation]:
 def _newline_style(raw: bytes) -> str:
     crlf = raw.count(b"\r\n")
     bare_lf = raw.count(b"\n") - crlf
-    if crlf and bare_lf:
+    bare_cr = raw.count(b"\r") - crlf
+    if sum(bool(count) for count in (crlf, bare_lf, bare_cr)) > 1:
         return "mixed"
     if crlf:
         return "crlf"
     if bare_lf:
         return "lf"
+    if bare_cr:
+        return "cr"
     return "none"
 
 
 def _compiler_manifest(
-    compilation: CryticCompile, aliases: dict[str, str]
+    compilation: CryticCompile, aliases: dict[str, str], repo_root: Path
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for unit in compilation.compilation_units.values():
         version = unit.compiler_version
         files = sorted(
-            aliases.get(str(Path(f.absolute).resolve()), f"unmapped/{f.short}")
-            for f in unit.filenames
+            {
+                _source_alias(str(Path(f.absolute).resolve()), aliases)
+                for f in unit.filenames
+            }
         )
+        settings = getattr(unit, "_solflow_compiler_settings", None)
         entries.append(
             {
                 "compiler": version.compiler,
                 "version": version.version,
+                "long_version": getattr(unit, "_solflow_compiler_long_version", None),
                 "optimized": version.optimized,
                 "optimize_runs": version.optimize_runs,
                 "via_ir": version.via_ir,
                 "source_paths": files,
-                "binary_sha256": _compiler_binary_sha256(
-                    version.compiler, version.version
+                "settings": _portable_settings(settings, aliases, repo_root),
+                "settings_provenance": (
+                    "compiler_input" if settings is not None else "unavailable"
+                ),
+                "source_inputs": sorted(
+                    [
+                        {
+                            "path": _source_alias(str(Path(name).resolve()), aliases),
+                            "sha256": hashlib.sha256(data).hexdigest(),
+                            "bytes": len(data),
+                        }
+                        for name, data in getattr(
+                            unit, "_solflow_source_bytes", {}
+                        ).items()
+                    ],
+                    key=_canonical_bytes,
+                ),
+                "binary_sha256": getattr(unit, "_solflow_compiler_binary_sha256", None),
+                "binary_provenance": getattr(
+                    unit, "_solflow_compiler_binary_provenance", "unavailable"
                 ),
             }
         )
-    entries.sort(
-        key=lambda e: (
-            str(e["compiler"]),
-            str(e["version"]),
-            _digest_json(e["source_paths"]),
-        )
-    )
+    entries.sort(key=_canonical_bytes)
     return entries
 
 
-def _compiler_binary_sha256(compiler: str, version: str | None) -> str | None:
-    candidate: Path | None = None
-    if compiler == "solc" and version:
-        try:
-            from solc_select.constants import ARTIFACTS_DIR
-
-            artifact = ARTIFACTS_DIR / f"solc-{version}" / f"solc-{version}"
-            if artifact.is_file():
-                candidate = artifact
-        except (ImportError, OSError):
-            pass
-    if candidate is None:
-        found = shutil.which(compiler)
-        if found:
-            candidate = Path(found).resolve()
-    if candidate is None or not candidate.is_file():
-        return None
+def _portable_settings(value: Any, aliases: dict[str, str], repo_root: Path) -> Any:
+    """Preserve compiler settings while replacing filesystem resource names."""
+    if isinstance(value, dict):
+        out = {}
+        for key, child in value.items():
+            portable_key = _portable_settings(key, aliases, repo_root)
+            if portable_key in out:
+                raise ExportError("ambiguous portable compiler setting key")
+            out[portable_key] = _portable_settings(child, aliases, repo_root)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_portable_settings(child, aliases, repo_root) for child in value]
+    if not isinstance(value, str):
+        return value
+    prefix, sep, target = value.partition("=")
+    if sep and (Path(target).is_absolute() or PureWindowsPath(target).is_absolute()):
+        return prefix + sep + _portable_settings(target, aliases, repo_root)
+    if not (Path(value).is_absolute() or PureWindowsPath(value).is_absolute()):
+        return value
+    path = Path(value).resolve()
+    if str(path) in aliases:
+        return aliases[str(path)]
+    trailing = "/" if value.endswith(("/", "\\")) else ""
     try:
-        return hashlib.sha256(candidate.read_bytes()).hexdigest()
-    except OSError:
-        return None
+        return path.relative_to(repo_root).as_posix() + trailing
+    except ValueError:
+        members = sorted(
+            {
+                alias
+                for name, alias in aliases.items()
+                if Path(name).is_absolute() and Path(name).is_relative_to(path)
+            }
+        )
+        if members:
+            return f"external/{_digest_json(members)}/".rstrip("/") + trailing
+        raise ExportError(
+            "compiler setting references an unmapped absolute path"
+        ) from None
 
 
 def _sanitize(value: Any, aliases: dict[str, str]) -> Any:
@@ -245,17 +318,26 @@ def _sanitize(value: Any, aliases: dict[str, str]) -> Any:
         out = {k: _sanitize(v, aliases) for k, v in value.items()}
         if "filename_absolute" in out and "filename_relative" in out:
             absolute = str(Path(out.pop("filename_absolute")).resolve())
-            out["filename_relative"] = aliases.get(absolute, out["filename_relative"])
+            out["filename_relative"] = _source_alias(absolute, aliases)
         if isinstance(out.get("source_path"), str):
             source_path = Path(out["source_path"])
-            if source_path.is_absolute():
-                out["source_path"] = aliases.get(
-                    str(source_path.resolve()), out["source_path"]
-                )
+            label = (
+                str(source_path.resolve())
+                if source_path.is_absolute()
+                else str(source_path)
+            )
+            out["source_path"] = _source_alias(label, aliases)
         return out
     if isinstance(value, tuple | list):
         return [_sanitize(item, aliases) for item in value]
     return value
+
+
+def _source_alias(absolute: str, aliases: dict[str, str]) -> str:
+    try:
+        return aliases[absolute]
+    except KeyError as exc:
+        raise ExportError("source path is absent from the compiled manifest") from exc
 
 
 def _flat_edges(flows: Iterable[Flow], aliases: dict[str, str]) -> list[dict[str, Any]]:
@@ -321,7 +403,9 @@ def _walk_edges(
                     "resolved": True,
                     "followed": False,
                     "target": child.target_canonical_name,
-                    "source_path": child.source_path,
+                    "source_path": _sanitize(
+                        {"source_path": child.source_path}, aliases
+                    )["source_path"],
                     "value_expression": child.value_expression,
                     "call_site": _sanitize(asdict(child.call_site), aliases),
                 }
