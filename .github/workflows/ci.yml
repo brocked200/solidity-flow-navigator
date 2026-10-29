@@ -19,7 +19,7 @@ jobs:
       - run: pip install ".[dev]"
       - run: black --check .
       - run: ruff check
-      # The 69 Solmate integration tests skip here: the sibling
+      # Solmate integration tests skip here: the pinned sibling
       # test-repos/solmate clone and Foundry are not installed in CI
-      # (see tests/conftest.py). They remain part of the local gate.
+      # (see docs/INTEGRATION_TESTS.md). The local merge gate requires them.
       - run: pytest -q
