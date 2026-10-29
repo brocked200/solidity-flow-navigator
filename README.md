@@ -30,9 +30,9 @@ The first job in any audit is reconstructing what actually happens when someone 
 - **Progressive or bird's-eye.** Flows open at the root and expand on demand, so you reveal only the paths you're tracing. Expand all / Collapse all flip the whole tree at once, or start with `--expand-all`. Your expanded call sites are remembered per Flow.
 - **Light or dark.** A header toggle sets the palette to Auto (follows your OS), Light, or Dark. The choice is server-rendered, so there's no flash on load, and your preference never leaves the machine.
 - **Bookmarks & progress.** Bookmark the entry points and contracts you keep returning to; they collect in a *Bookmarked* section atop the index, and entry points you've already opened are tinted so you can see your progress. It's a first-party localhost cookie (no accounts, nothing leaves the machine) and works with JavaScript disabled.
-- **It never silently lies.** When a call target can't be resolved statically (an unbound interface, `addr.call(...)`, computed-target Yul), the node is explicitly marked unresolved, with the reason. No guessing, no silent omissions. The auditor's trust in a Flow's completeness within its declared scope is the load-bearing property.
+- **Explicit analysis boundaries.** Unbound interfaces, dynamic calls, ambiguous targets, and missing implementations remain unresolved with a reason. Stubs stop traversal and bindings assert an implementation assumption. A Flow with any of these boundaries is not a complete runtime call graph.
 - **Value sinks are first-class.** Native-value `send`, `transfer`, contract creation, and value-bearing calls are surfaced separately from unresolved and dynamic-dispatch metrics, so `0 unresolved` is never presented as `0 money movement`.
-- **Byte-accurate source ranges.** Source-map byte offsets are resolved against the original source bytes, preserving correct bodies and call anchors for CRLF and multibyte UTF-8 files.
+- **Byte-accurate source ranges.** Source-map byte offsets address the compiler's source snapshot, preserving correct bodies and call anchors for CRLF and multibyte UTF-8 files, including adapters that normalize newlines.
 - **Deterministic JSON artifacts.** `--export-json` emits content-addressed source/compiler/scope metadata, binding assumptions, Flow trees, and a flat edge inventory without starting Flask.
 - **Bind interfaces to implementations.** When a call exits through an interface (`IOracle(addr).price()`), pin the concrete contract that runs and SolFlow resolves into its body, at every call site across every Flow. Bind from any interface node or the **Bindings** panel on the index, then **Save** to `solflow.toml` so it persists. A bound edge stays badged as an asserted assumption, not a static proof.
 - **Scope you control.** Inline a dependency, stub a dense in-tree math library, or exclude test and mock contracts, via `solflow.toml` or CLI flags (see [Configuration](#configuration)).
@@ -54,7 +54,7 @@ For the latest development build, install from git:
 pipx install git+https://github.com/norah1499/solidity-flow-navigator
 ```
 
-Install this hardened fork directly from its pinned branch:
+Install this hardened fork directly from its custom branch:
 
 ```bash
 pipx install 'git+https://github.com/brocked200/solidity-flow-navigator@codex/hardened-audit-flows-20261028'
@@ -62,7 +62,7 @@ pipx install 'git+https://github.com/brocked200/solidity-flow-navigator@codex/ha
 
 Check your version with `solflow --version` and upgrade with `pipx upgrade solflow`. To uninstall, run `pipx uninstall solflow` (its bundled dependencies go with it); `solc-select` is a separate `pipx uninstall solc-select`.
 
-SolFlow makes no network calls and never checks for updates. That is the same local-and-private property that keeps audited code on your machine, so watch the [releases](https://github.com/norah1499/solidity-flow-navigator/releases) or just run `pipx upgrade solflow` now and then.
+SolFlow's UI makes no network calls and never checks for updates. Detected build tools can execute project configuration and download dependencies; use external isolation for untrusted targets as described below. Watch the [releases](https://github.com/norah1499/solidity-flow-navigator/releases) or run `pipx upgrade solflow` for updates.
 
 ### When the first run fails
 
