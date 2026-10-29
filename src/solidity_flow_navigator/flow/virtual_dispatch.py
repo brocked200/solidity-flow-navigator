@@ -64,8 +64,10 @@ def resolve_virtual_override(
             invoker_contract.name,
         ) + invoker_contract.linearized_base_contract_names
         lookup = contracts_by_name
-    for key in chain:
-        contract = lookup.get(key)
+    for index, key in enumerate(chain):
+        # The exact invoker object is already known. Its bare name may be
+        # shared by another source, so never reselect it through that map.
+        contract = invoker_contract if index == 0 else lookup.get(key)
         if contract is None:
             continue
         candidates = contract.modifiers if is_modifier else contract.functions

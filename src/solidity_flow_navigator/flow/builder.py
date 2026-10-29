@@ -4,7 +4,7 @@ This is the public Layer 2 entry point (spec §11.1). The transformation is
 pure: facts in, ``tuple[Flow, ...]`` out. No I/O, no Slither imports.
 
 The dispatch from ``CallEdge`` → ``FlowNode`` follows §11.9's table. Cycle
-detection uses path-tracking (a per-Flow ``frozenset[str]`` of canonical
+detection uses path-tracking (a per-Flow ``frozenset[_TraversalKey]`` of canonical
 names threaded through the recursion); on a back-edge the cycle target is
 emitted as a ``FunctionNode`` with empty ``children`` per spec §11.10's v0
 limitation list.
@@ -46,6 +46,8 @@ from .types import (
 from .virtual_dispatch import resolve_virtual_override
 
 _log = logging.getLogger(__name__)
+
+_TraversalKey = tuple[str, str, tuple[str, str]]
 
 # Names of Slither-synthesized pseudo-functions that occasionally surface as
 # real-looking entry points in some Slither configurations. Layer 1 already
@@ -127,6 +129,8 @@ class _FlowBuilder:
         "_contracts_by_name",
         "_contracts_by_uid",
         "_functions_by_canonical",
+        "_functions_by_identity",
+        "_ambiguous_canonical_names",
         "_type_defs_by_canonical",
         "_current_invoker_contract",
     )
@@ -164,13 +168,23 @@ class _FlowBuilder:
         # interface twice (e.g. ctf-exchange-v2's two IConditionalTokens) should
         # emit one diagnostic line per pair, not one per shared method.
         self._functions_by_canonical: dict[str, Function] = {}
+        self._functions_by_identity: dict[tuple[tuple[str, str], str], Function] = {}
+        self._ambiguous_canonical_names: set[str] = set()
         collisions: dict[tuple[tuple[str, str], tuple[str, str]], int] = {}
 
         def _register(fn: Function) -> None:
+            self._functions_by_identity[
+                (fn.contract_declarer_uid, fn.canonical_name)
+            ] = fn
             existing = self._functions_by_canonical.get(fn.canonical_name)
             if existing is None:
                 self._functions_by_canonical[fn.canonical_name] = fn
-            elif existing.contract_declarer_uid != fn.contract_declarer_uid:
+            elif (
+                existing.contract_declarer_uid != fn.contract_declarer_uid
+                or existing.source_location.filename_relative
+                != fn.source_location.filename_relative
+            ):
+                self._ambiguous_canonical_names.add(fn.canonical_name)
                 key = (existing.contract_declarer_uid, fn.contract_declarer_uid)
                 collisions[key] = collisions.get(key, 0) + 1
 
@@ -226,8 +240,11 @@ class _FlowBuilder:
             keys = (contract.uid,) + contract.linearized_base_contract_uids
             lookup = self._contracts_by_uid
         else:
-            keys = (contract.name,) + contract.linearized_base_contract_names
+            keys = contract.linearized_base_contract_names
             lookup = self._contracts_by_name
+            # The invoker is already an exact object; looking it up by bare
+            # name can substitute a different same-named declaration.
+            yield contract
         for key in keys:
             resolved = lookup.get(key)
             if resolved is not None:
@@ -284,7 +301,15 @@ class _FlowBuilder:
         # Path tracking is per-Flow: each entry point starts with a fresh
         # set so the same function can be expanded under two different
         # entry points without confusion.
-        path: frozenset[str] = frozenset({entry_func.canonical_name})
+        path: frozenset[_TraversalKey] = frozenset(
+            {
+                (
+                    entry_func.source_location.filename_relative,
+                    entry_func.canonical_name,
+                    invoker_contract.uid,
+                )
+            }
+        )
 
         prev_invoker = self._current_invoker_contract
         self._current_invoker_contract = invoker_contract
@@ -336,7 +361,7 @@ class _FlowBuilder:
             self._current_invoker_contract = prev_invoker
 
     def _build_modifier_children(
-        self, func: Function, path: frozenset[str]
+        self, func: Function, path: frozenset[_TraversalKey]
     ) -> tuple[FlowNode, ...]:
         """Build the inline modifier nodes that precede ``func``'s body children (§11.6).
 
@@ -404,7 +429,7 @@ class _FlowBuilder:
         self,
         func: Function,
         invoked_via_super: bool,
-        path: frozenset[str],
+        path: frozenset[_TraversalKey],
         call_site_line: int | None = None,
         call_kind: str | None = None,
         bound_via: Binding | None = None,
@@ -432,7 +457,12 @@ class _FlowBuilder:
 
         invoker_name = self._invoker_name()
 
-        if func.canonical_name in path:
+        key = (
+            func.source_location.filename_relative,
+            func.canonical_name,
+            self._require_invoker().uid,
+        )
+        if key in path:
             # v0: implicit cycle termination per spec §11.10. Renderer can
             # spot the cycle by matching canonical_name against an ancestor.
             return self._terminal_function_node(
@@ -445,7 +475,8 @@ class _FlowBuilder:
                 call_value,
             )
 
-        new_path = path | {func.canonical_name}
+        new_path = path | {key}
+        modifier_children = self._build_modifier_children(func, new_path)
         children, builtins = self._process_calls(
             func.calls,
             caller_declarer=func.contract_declarer_name,
@@ -467,7 +498,7 @@ class _FlowBuilder:
             source_code=func.source_code,
             source_location=func.source_location,
             builtins_used=builtins,
-            children=children,
+            children=modifier_children + children,
             call_site_line=call_site_line,
             call_kind=call_kind,
             bound_via=bound_via,
@@ -592,7 +623,7 @@ class _FlowBuilder:
         calls: tuple[CallEdge, ...],
         caller_declarer: str,
         caller_declarer_uid: tuple[str, str],
-        path: frozenset[str],
+        path: frozenset[_TraversalKey],
     ) -> tuple[tuple[FlowNode, ...], tuple[str, ...]]:
         """Split outgoing calls into FlowNode children and folded builtin markers.
 
@@ -657,7 +688,7 @@ class _FlowBuilder:
         edge: CallEdge,
         caller_declarer: str,
         caller_declarer_uid: tuple[str, str],
-        path: frozenset[str],
+        path: frozenset[_TraversalKey],
     ) -> FlowNode | str | None:
         """Apply §11.9's dispatch table to one edge.
 
@@ -696,6 +727,15 @@ class _FlowBuilder:
                 raw_subkind=edge.subkind,
                 value_expression=edge.value_expression,
             )
+        if kind == "internal_dynamic":
+            return UnresolvedNode(
+                reason=UnresolvedReason.INTERNAL_DYNAMIC_CALL,
+                descriptor=edge.subkind or "<internal function pointer>",
+                call_site=edge.source_location,
+                raw_kind=edge.kind,
+                raw_subkind=edge.subkind,
+                value_expression=edge.value_expression,
+            )
         if kind == "solidity":
             if is_yul_dynamic_dispatch_subkind(edge.subkind):
                 return UnresolvedNode(
@@ -721,7 +761,7 @@ class _FlowBuilder:
         edge: CallEdge,
         caller_declarer: str,
         caller_declarer_uid: tuple[str, str],
-        path: frozenset[str],
+        path: frozenset[_TraversalKey],
         is_library: bool,
     ) -> FlowNode | None:
         """Internal and library calls recurse into the target's body, except
@@ -749,7 +789,12 @@ class _FlowBuilder:
                 f"{edge.source_location.filename_relative}:"
                 f"{edge.source_location.lines}"
             )
-        lexical_target = self._functions_by_canonical.get(edge.target_canonical_name)
+        if (
+            edge.target_contract_uid is None
+            and edge.target_canonical_name in self._ambiguous_canonical_names
+        ):
+            return self._ambiguous_target(edge)
+        lexical_target = self._edge_target(edge)
         if lexical_target is None:
             raise KeyError(
                 f"{edge.kind} call target {edge.target_canonical_name!r} not "
@@ -777,14 +822,35 @@ class _FlowBuilder:
         # virtual dispatch (spec §11.5). Without this gate, a super call
         # would re-resolve back to the most-derived override — the opposite
         # of what `super` means.
-        invoked_via_super = (not is_library) and self._is_super_internal_call(
-            lexical_target, caller_declarer, caller_declarer_uid
+        invoked_via_super = (not is_library) and (
+            edge.is_super_call
+            if edge.is_super_call is not None
+            else self._is_super_internal_call(
+                lexical_target, caller_declarer, caller_declarer_uid
+            )
         )
 
         # Virtual dispatch (§11.5, v0.3): re-resolve through the invoker's
         # C3 chain for non-super internal calls. Library calls are exempt.
-        if is_library or invoked_via_super:
+        if is_library or edge.is_static_call:
             target: Function = lexical_target
+        elif invoked_via_super:
+            chain = iter(self._linearization(self._require_invoker()))
+            for base in chain:
+                if base.uid == caller_declarer_uid:
+                    break
+            target = next(
+                (
+                    candidate
+                    for base in chain
+                    for candidate in (
+                        base.modifiers if lexical_target.is_modifier else base.functions
+                    )
+                    if candidate.full_name == lexical_target.full_name
+                    and candidate.is_implemented
+                ),
+                lexical_target,
+            )
         else:
             resolved = resolve_virtual_override(
                 self._require_invoker(),
@@ -851,7 +917,9 @@ class _FlowBuilder:
             call_kind="library" if (is_library or target_on_library) else "internal",
         )
 
-    def _handle_high_level(self, edge: CallEdge, path: frozenset[str]) -> FlowNode:
+    def _handle_high_level(
+        self, edge: CallEdge, path: frozenset[_TraversalKey]
+    ) -> FlowNode:
         """High-level (cross-contract via type) calls: recurse if Slither
         bound a target, else INTERFACE_CALL_NO_BINDING (§11.9, §13.1).
 
@@ -894,7 +962,12 @@ class _FlowBuilder:
                 raw_subkind=edge.subkind,
                 value_expression=edge.value_expression,
             )
-        lexical_target = self._functions_by_canonical.get(edge.target_canonical_name)
+        if (
+            edge.target_contract_uid is None
+            and edge.target_canonical_name in self._ambiguous_canonical_names
+        ):
+            return self._ambiguous_target(edge)
+        lexical_target = self._edge_target(edge)
         if lexical_target is None:
             # Slither bound a name but the target isn't in our facts. Treat
             # the same as an unbound interface call: try a binding, else the
@@ -925,8 +998,20 @@ class _FlowBuilder:
             lexical_target.contract_declarer_uid, lexical_target.contract_declarer_name
         )
         if target_declarer is not None and target_declarer.is_interface:
+            receiver = (
+                self._contracts_by_uid.get(edge.static_receiver_uid)
+                if edge.static_receiver_uid is not None
+                else self._contracts_by_name.get(edge.target_contract_name or "")
+            )
+            if edge.static_receiver_uid is not None and receiver is None:
+                return self._ambiguous_target(edge)
+            interface_name = (
+                receiver.name
+                if receiver is not None and receiver.is_interface
+                else lexical_target.contract_declarer_name
+            )
             bound = self._try_bind(
-                lexical_target.contract_declarer_name,
+                interface_name,
                 method_full_name=lexical_target.full_name,
                 method_bare_name=lexical_target.name,
                 edge=edge,
@@ -949,7 +1034,11 @@ class _FlowBuilder:
         # dispatch goes through the target's own contract type, not the
         # invoker's chain.
         invoker = self._require_invoker()
-        is_self_call = lexical_target.contract_declarer_uid == invoker.uid
+        is_self_call = (
+            edge.is_self_call
+            if edge.is_self_call is not None
+            else lexical_target.contract_declarer_uid == invoker.uid
+        )
         if is_self_call:
             resolved = resolve_virtual_override(
                 invoker, lexical_target, self._contracts_by_name, self._contracts_by_uid
@@ -961,10 +1050,41 @@ class _FlowBuilder:
                     call_site=edge.source_location,
                     raw_kind=edge.kind,
                     raw_subkind=edge.subkind,
+                    value_expression=edge.value_expression,
                 )
             target: Function = resolved
         else:
             target = lexical_target
+
+        if not target.is_implemented:
+            return UnresolvedNode(
+                reason=UnresolvedReason.ABSTRACT_NO_IMPLEMENTATION,
+                descriptor=_describe_abstract_no_impl(target),
+                call_site=edge.source_location,
+                raw_kind=edge.kind,
+                raw_subkind=edge.subkind,
+                value_expression=edge.value_expression,
+            )
+
+        external_invoker = target_declarer
+        if not is_self_call:
+            if edge.static_receiver_uid is not None:
+                external_invoker = self._contracts_by_uid.get(edge.static_receiver_uid)
+            elif (
+                edge.target_contract_name
+                and edge.target_contract_name != target.contract_declarer_name
+            ):
+                receivers = [
+                    contract
+                    for contract in self.facts.contracts
+                    if contract.name == edge.target_contract_name
+                ]
+                external_invoker = receivers[0] if len(receivers) == 1 else None
+            if external_invoker is None:
+                # The callee declarer's UID does not identify an inherited
+                # receiver. Guessing a same-named derived contract would
+                # fabricate virtual calls inside the inherited body.
+                return self._ambiguous_target(edge)
 
         # Same precedence as _handle_internal_or_library: stub_paths wins
         # over the default lib/-stub-vs-inline decision (§11.8 conflict rule).
@@ -982,13 +1102,37 @@ class _FlowBuilder:
         # (``this.X()``), not a call onto another contract — classify it
         # "internal" so the renderer's title and badge follow the inheritance
         # model rather than claiming an external trust boundary.
-        return self._build_function_node(
-            target,
-            invoked_via_super=False,
-            path=path,
-            call_site_line=_first_line_or_none(edge.source_location.lines),
-            call_kind="internal" if is_self_call else "external",
-            call_value=edge.value_expression,
+        previous_invoker = self._current_invoker_contract
+        if not is_self_call:
+            self._current_invoker_contract = external_invoker
+        try:
+            return self._build_function_node(
+                target,
+                invoked_via_super=False,
+                path=path,
+                call_site_line=_first_line_or_none(edge.source_location.lines),
+                call_kind="internal" if is_self_call else "external",
+                call_value=edge.value_expression,
+            )
+        finally:
+            self._current_invoker_contract = previous_invoker
+
+    def _edge_target(self, edge: CallEdge) -> Function | None:
+        if edge.target_contract_uid is not None:
+            return self._functions_by_identity.get(
+                (edge.target_contract_uid, edge.target_canonical_name)
+            )
+        return self._functions_by_canonical.get(edge.target_canonical_name)
+
+    @staticmethod
+    def _ambiguous_target(edge: CallEdge) -> UnresolvedNode:
+        return UnresolvedNode(
+            reason=UnresolvedReason.AMBIGUOUS_TARGET,
+            descriptor=f"ambiguous {edge.target_canonical_name}",
+            call_site=edge.source_location,
+            raw_kind=edge.kind,
+            raw_subkind=edge.subkind,
+            value_expression=edge.value_expression,
         )
 
     def _try_bind(
@@ -998,7 +1142,7 @@ class _FlowBuilder:
         method_full_name: str | None,
         method_bare_name: str | None,
         edge: CallEdge,
-        path: frozenset[str],
+        path: frozenset[_TraversalKey],
     ) -> FlowNode | None:
         """Resolve an interface call site through a user-supplied binding (§13.2).
 
@@ -1029,7 +1173,16 @@ class _FlowBuilder:
             interface_name=interface_name, contract_name=bound_contract_name
         )
         bound_contract = self._contracts_by_name.get(bound_contract_name)
-        if bound_contract is None:
+        if (
+            bound_contract is None
+            or sum(c.name == bound_contract_name for c in self.facts.contracts) != 1
+            or bound_contract.kind != "contract"
+            or bound_contract.is_abstract
+            or contract_excluded(self.scope, bound_contract.name)
+            or path_excluded(
+                self.scope, bound_contract.source_location.filename_relative
+            )
+        ):
             return UnresolvedNode(
                 reason=UnresolvedReason.INTERFACE_BINDING_FAILED,
                 descriptor=(
@@ -1095,17 +1248,23 @@ class _FlowBuilder:
         turns that into an ``INTERFACE_BINDING_FAILED`` node.
         """
 
+        matches: dict[str, Function] = {}
         for contract in self._linearization(bound_contract):
             for candidate in contract.functions:
-                if not candidate.is_implemented:
+                if not candidate.is_implemented or candidate.visibility not in (
+                    "public",
+                    "external",
+                ):
                     continue
                 if method_full_name is not None:
                     if candidate.full_name == method_full_name:
                         return candidate
                 elif method_bare_name is not None:
                     if candidate.name == method_bare_name:
-                        return candidate
-        return None
+                        matches.setdefault(candidate.full_name, candidate)
+        # A bare name is insufficient to choose among overloads. Keep the
+        # boundary unresolved instead of fabricating the first matching edge.
+        return next(iter(matches.values())) if len(matches) == 1 else None
 
     def _external_node(self, target: Function, edge: CallEdge) -> ExternalNode:
         return ExternalNode(
@@ -1237,6 +1396,7 @@ def _security_surface_counts(root: FlowNode) -> tuple[int, int]:
         if root.reason in (
             UnresolvedReason.LOW_LEVEL_CALL,
             UnresolvedReason.YUL_DYNAMIC_DISPATCH,
+            UnresolvedReason.INTERNAL_DYNAMIC_CALL,
         ):
             dynamic_count += 1
         return value_count, dynamic_count

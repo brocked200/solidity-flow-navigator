@@ -12,6 +12,7 @@ diagnosable failures rather than ``StopIteration`` or empty matches.
 
 import logging
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 
 import pytest
 
@@ -317,6 +318,211 @@ def test_binding_to_unimplemented_method_is_failed_node() -> None:
     node = _flow_by_entry_point(flows, "Vault", "poke()").root.children[0]
     assert isinstance(node, UnresolvedNode)
     assert node.reason == UnresolvedReason.INTERFACE_BINDING_FAILED
+
+
+def test_binding_to_excluded_contract_is_failed_node() -> None:
+    scope = Scope(
+        exclude_contracts=("AaveStrategy",),
+        interface_bindings=(("IStrategy", "AaveStrategy"),),
+    )
+    node = _flow_by_entry_point(
+        build_flows(_binding_facts(), scope), "Vault", "poke()"
+    ).root.children[0]
+    assert isinstance(node, UnresolvedNode)
+    assert node.reason == UnresolvedReason.INTERFACE_BINDING_FAILED
+
+
+def test_binding_without_signature_rejects_ambiguous_overloads() -> None:
+    facts = _binding_facts()
+    vault, iface, impl = facts.contracts
+    edge = replace(
+        vault.functions[0].calls[0], is_resolved=False, target_canonical_name=None
+    )
+    vault = replace(vault, functions=(replace(vault.functions[0], calls=(edge,)),))
+    impl = replace(
+        impl,
+        functions=(
+            _bfunc("AaveStrategy", "run(uint256)"),
+            _bfunc("AaveStrategy", "run(address)"),
+        ),
+    )
+    facts = replace(facts, contracts=(vault, iface, impl))
+    scope = Scope(interface_bindings=(("IStrategy", "AaveStrategy"),))
+    node = _flow_by_entry_point(
+        build_flows(facts, scope), "Vault", "poke()"
+    ).root.children[0]
+    assert isinstance(node, UnresolvedNode)
+    assert node.reason == UnresolvedReason.INTERFACE_BINDING_FAILED
+
+
+def test_binding_does_not_resolve_private_method() -> None:
+    facts = _binding_facts()
+    vault, iface, impl = facts.contracts
+    impl = replace(impl, functions=(replace(impl.functions[0], visibility="private"),))
+    facts = replace(facts, contracts=(vault, iface, impl))
+    scope = Scope(interface_bindings=(("IStrategy", "AaveStrategy"),))
+    node = _flow_by_entry_point(
+        build_flows(facts, scope), "Vault", "poke()"
+    ).root.children[0]
+    assert isinstance(node, UnresolvedNode)
+    assert node.reason == UnresolvedReason.INTERFACE_BINDING_FAILED
+
+
+def test_bodyless_concrete_type_call_is_unresolved_with_value() -> None:
+    facts = _binding_facts()
+    vault, iface, impl = facts.contracts
+    iface = replace(iface, kind="contract", is_interface=False, is_abstract=True)
+    edge = replace(vault.functions[0].calls[0], value_expression="amount")
+    vault = replace(vault, functions=(replace(vault.functions[0], calls=(edge,)),))
+    flow = _flow_by_entry_point(
+        build_flows(replace(facts, contracts=(vault, iface, impl)), Scope()),
+        "Vault",
+        "poke()",
+    )
+    node = flow.root.children[0]
+    assert isinstance(node, UnresolvedNode)
+    assert flow.unresolved_count == 1
+    assert flow.value_sink_count == 1
+
+
+def test_external_body_uses_its_own_virtual_dispatch_context() -> None:
+    external = CallEdge(
+        "high_level", None, "Strategy.work()", "work", "Strategy", True, _bsl()
+    )
+    internal = CallEdge(
+        "internal",
+        None,
+        "Base.hook()",
+        "hook",
+        "Base",
+        True,
+        _bsl(),
+        is_super_call=False,
+    )
+    vault = _bcontract(
+        "Vault",
+        functions=(_bfunc("Vault", "poke()", is_entry_point=True, calls=(external,)),),
+    )
+    base = _bcontract(
+        "Base", functions=(replace(_bfunc("Base", "hook()"), is_virtual=True),)
+    )
+    strategy = replace(
+        _bcontract(
+            "Strategy",
+            functions=(
+                _bfunc("Strategy", "work()", calls=(internal,)),
+                _bfunc("Strategy", "hook()"),
+            ),
+        ),
+        linearized_base_contract_names=("Base",),
+    )
+    facts = RepoFacts("/abs", (vault, base, strategy), ())
+    node = _flow_by_entry_point(
+        build_flows(facts, Scope()), "Vault", "poke()"
+    ).root.children[0]
+    assert isinstance(node, FunctionNode)
+    assert node.invoked_via_contract_name == "Strategy"
+    assert isinstance(node.children[0], FunctionNode)
+    assert node.children[0].canonical_name == "Strategy.hook()"
+
+
+def test_binding_rejects_duplicate_contract_names() -> None:
+    facts = _binding_facts()
+    first = facts.contracts[-1]
+    duplicate = replace(first, source_location=_bsl("src/other.sol"))
+    facts = replace(facts, contracts=(*facts.contracts, duplicate))
+    scope = Scope(interface_bindings=(("IStrategy", "AaveStrategy"),))
+    node = _flow_by_entry_point(
+        build_flows(facts, scope), "Vault", "poke()"
+    ).root.children[0]
+    assert isinstance(node, UnresolvedNode)
+    assert node.reason == UnresolvedReason.INTERFACE_BINDING_FAILED
+
+
+@pytest.mark.parametrize("has_uid", [False, True])
+def test_call_target_collision_never_selects_arbitrary_declaration(has_uid) -> None:
+    first = _bfunc("Twin", "run()")
+    second = replace(first, source_location=_bsl("src/second.sol"))
+    edge = CallEdge(
+        "high_level",
+        None,
+        "Twin.run()",
+        "run",
+        "Twin",
+        True,
+        _bsl(),
+        target_contract_uid=second.contract_declarer_uid if has_uid else None,
+        is_self_call=False,
+    )
+    vault = _bcontract(
+        "Vault",
+        functions=(_bfunc("Vault", "poke()", is_entry_point=True, calls=(edge,)),),
+    )
+    facts = RepoFacts(
+        "/abs",
+        (
+            vault,
+            _bcontract("Twin", functions=(first,)),
+            replace(
+                _bcontract("Twin", functions=(second,)),
+                source_location=second.source_location,
+            ),
+        ),
+        (),
+    )
+    node = _flow_by_entry_point(
+        build_flows(facts, Scope()), "Vault", "poke()"
+    ).root.children[0]
+    if has_uid:
+        assert isinstance(node, FunctionNode)
+        assert node.source_location.filename_relative == "src/second.sol"
+    else:
+        assert isinstance(node, UnresolvedNode)
+        assert "ambiguous" in node.reason
+
+
+def test_cycle_key_distinguishes_same_named_functions_in_other_files() -> None:
+    sink = CallEdge(
+        "transfer",
+        None,
+        None,
+        None,
+        None,
+        False,
+        _bsl("src/second.sol"),
+        value_expression="amount",
+    )
+    second = replace(
+        _bfunc("Twin", "run()", calls=(sink,)), source_location=_bsl("src/second.sol")
+    )
+    call = CallEdge(
+        "high_level",
+        None,
+        "Twin.run()",
+        "run",
+        "Twin",
+        True,
+        _bsl(),
+        target_contract_uid=second.contract_declarer_uid,
+        is_self_call=False,
+    )
+    first = _bfunc("Twin", "run()", is_entry_point=True, calls=(call,))
+    facts = RepoFacts(
+        "/abs",
+        (
+            _bcontract("Twin", functions=(first,)),
+            replace(
+                _bcontract("Twin", functions=(second,)),
+                source_location=second.source_location,
+            ),
+        ),
+        (),
+    )
+    flow = build_flows(facts, Scope())[0]
+    assert isinstance(flow.root.children[0], FunctionNode)
+    assert len(flow.root.children[0].children) == 1
+    assert isinstance(flow.root.children[0].children[0], SinkNode)
+    assert flow.value_sink_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -3151,3 +3357,123 @@ def test_canonical_name_collision_keeps_first_and_logs_once_per_pair(
     assert "'Foo'" in caplog.text
     assert "src/a/Foo.sol" in caplog.text and "src/b/Foo.sol" in caplog.text
     assert "2 function" in caplog.text
+
+
+def test_nested_callee_modifier_keeps_its_value_sink_once() -> None:
+    sink = CallEdge(
+        "transfer", None, None, None, None, False, _bsl(), value_expression="amount"
+    )
+    mod = replace(_bfunc("Strategy", "guard()", calls=(sink,)), is_modifier=True)
+    work = replace(_bfunc("Strategy", "work()"), modifier_names=("guard",))
+    strategy = replace(_bcontract("Strategy", functions=(work,)), modifiers=(mod,))
+    edge = CallEdge(
+        "high_level",
+        None,
+        "Strategy.work()",
+        "work",
+        "Strategy",
+        True,
+        _bsl(),
+        is_self_call=False,
+    )
+    vault = _bcontract(
+        "Vault",
+        functions=(_bfunc("Vault", "poke()", is_entry_point=True, calls=(edge,)),),
+    )
+    flow = build_flows(RepoFacts("/abs", (vault, strategy), ()), Scope())[0]
+    assert flow.value_sink_count == 1
+    child = flow.root.children[0]
+    assert isinstance(child, FunctionNode)
+    assert child.children[0].is_modifier
+
+
+def test_virtual_dispatch_uses_exact_same_named_invoker() -> None:
+    first_hook = replace(_bfunc("Twin", "hook()"), is_virtual=True)
+    second_hook = replace(first_hook, source_location=_bsl("src/second.sol"))
+    edge = CallEdge(
+        "internal",
+        None,
+        "Twin.hook()",
+        "hook",
+        "Twin",
+        True,
+        _bsl(),
+        target_contract_uid=first_hook.contract_declarer_uid,
+        is_super_call=False,
+    )
+    first = _bcontract(
+        "Twin",
+        functions=(
+            _bfunc("Twin", "entry()", is_entry_point=True, calls=(edge,)),
+            first_hook,
+        ),
+    )
+    second = replace(
+        _bcontract("Twin", functions=(second_hook,)),
+        source_location=second_hook.source_location,
+    )
+    flow = build_flows(RepoFacts("/abs", (first, second), ()), Scope())[0]
+    child = flow.root.children[0]
+    assert isinstance(child, FunctionNode)
+    assert child.source_location.filename_relative == "src/x.sol"
+
+
+def test_duplicate_free_function_name_stays_unresolved_without_identity() -> None:
+    first = _bfunc("", "run()")
+    first = replace(first, canonical_name="run()")
+    second = replace(first, source_location=_bsl("src/second.sol"))
+    edge = CallEdge("internal", None, "run()", "run", None, True, _bsl())
+    vault = _bcontract(
+        "Vault",
+        functions=(_bfunc("Vault", "poke()", is_entry_point=True, calls=(edge,)),),
+    )
+    flow = build_flows(RepoFacts("/abs", (vault,), (first, second)), Scope())[0]
+    child = flow.root.children[0]
+    assert isinstance(child, UnresolvedNode)
+    assert "ambiguous" in child.reason
+
+
+def test_internal_function_pointer_is_explicit_unresolved_dynamic() -> None:
+    edge = CallEdge(
+        "internal_dynamic", "function_pointer", None, None, None, False, _bsl()
+    )
+    vault = _bcontract(
+        "Vault",
+        functions=(_bfunc("Vault", "poke()", is_entry_point=True, calls=(edge,)),),
+    )
+    flow = build_flows(RepoFacts("/abs", (vault,), ()), Scope())[0]
+    node = flow.root.children[0]
+    assert isinstance(node, UnresolvedNode)
+    assert node.reason.value == "internal_dynamic_call"
+    assert flow.unresolved_count == 1
+    assert flow.dynamic_dispatch_count == 1
+
+
+@pytest.mark.parametrize("implementation", ["AaveStrategy", "Missing"])
+def test_inherited_interface_binding_uses_static_receiver(implementation) -> None:
+    facts = _binding_facts()
+    vault, base, impl = facts.contracts
+    child = replace(
+        _bcontract("IChild", kind="interface", is_interface=True),
+        linearized_base_contract_names=("IStrategy",),
+        linearized_base_contract_uids=(base.uid,),
+    )
+    edge = replace(
+        vault.functions[0].calls[0],
+        target_contract_name="IChild",
+        static_receiver_uid=child.uid,
+    )
+    vault = replace(vault, functions=(replace(vault.functions[0], calls=(edge,)),))
+    scope = Scope(interface_bindings=(("IChild", implementation),))
+    flow = _flow_by_entry_point(
+        build_flows(replace(facts, contracts=(vault, base, child, impl)), scope),
+        "Vault",
+        "poke()",
+    )
+    node = flow.root.children[0]
+    if implementation == "AaveStrategy":
+        assert isinstance(node, FunctionNode)
+        assert node.bound_via == Binding("IChild", implementation)
+    else:
+        assert isinstance(node, UnresolvedNode)
+        assert node.reason == UnresolvedReason.INTERFACE_BINDING_FAILED
