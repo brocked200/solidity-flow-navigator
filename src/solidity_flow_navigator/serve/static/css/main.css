@@ -1159,6 +1159,18 @@ body.index-page .site-main {
 }
 .meta-reviewed { color: var(--fg-faint); }
 .meta-depth { color: var(--fg-muted); }
+.meta-sink {
+  color: var(--tok-number);
+  border: 0.5px dotted var(--tok-number);
+  border-radius: 2px;
+  padding: 0.05rem 0.3rem;
+}
+.meta-dynamic {
+  color: var(--node-unresolved-border);
+  border: 0.5px dashed var(--node-unresolved-border);
+  border-radius: 2px;
+  padding: 0.05rem 0.3rem;
+}
 /* `N unr` is a chip in the --node-unresolved-* family so it rhymes with the
    UnresolvedNode borders on the Flow page. The dark blocks calm the fill. */
 .meta-unresolved {
@@ -1932,6 +1944,12 @@ body.flow-maximized .flow-sidebar-resize { display: none; }
   border-style: dashed;
 }
 
+.node--sink {
+  border-color: var(--tok-number);
+  background: var(--bg-surface);
+  border-style: dotted;
+}
+
 /* v0.23.0 (§10.2): subtle boundary rings so the two reference points stand out
    without shouting. `.node--entry` is the root/entry-point node (warm ring);
    `.node--active` is the node currently nearest the viewport centre (the call-
@@ -2004,6 +2022,12 @@ body.flow-maximized .flow-sidebar-resize { display: none; }
   background: transparent;
   color: var(--fg-muted);
   border: 0.5px dashed var(--node-external-border);
+}
+.badge-sink {
+  background: transparent;
+  color: var(--tok-number);
+  border: 0.5px dotted var(--tok-number);
+  font-weight: 600;
 }
 
 /* v0.10.4 relation badges (spec §10.2). `external call` reuses the dashed

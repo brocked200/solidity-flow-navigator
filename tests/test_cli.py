@@ -28,16 +28,16 @@ to overlap with is still covered via the config-file path
 from __future__ import annotations
 
 import argparse
-import socket
+import errno
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import solidity_flow_navigator.cli as cli_module
 from solidity_flow_navigator.cli import (
     DEFAULT_PORT,
-    SERVER_HOST,
     _bind_pair,
-    _bind_probe,
     _build_parser,
     _resolve_scope,
     _select_port,
@@ -400,6 +400,73 @@ def test_expand_all_flag_parses_true() -> None:
     assert args.expand_all is True
 
 
+def test_export_json_flag_parses_path() -> None:
+    """Machine export is explicit and does not revive the retired --json flag."""
+    parser = _build_parser()
+    args = parser.parse_args(["--export-json", "artifact.json", "some/repo"])
+    assert args.export_json == "artifact.json"
+
+
+def test_export_json_flag_accepts_stdout_sentinel() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["--export-json", "-", "some/repo"])
+    assert args.export_json == "-"
+
+
+def test_export_json_main_writes_and_does_not_start_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    captured: dict[str, object] = {}
+    fake_cc = object()
+    fake_facts = object()
+    fake_flows = (
+        SimpleNamespace(
+            entry_point_invoker_canonical_name="C.f()",
+            root=SimpleNamespace(children=()),
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli_module, "compile_repo", lambda _path: fake_cc)
+    monkeypatch.setattr(
+        cli_module,
+        "extract_facts",
+        lambda cc, _path: fake_facts if cc is fake_cc else None,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "build_flows",
+        lambda facts, _scope: fake_flows if facts is fake_facts else (),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "build_machine_export",
+        lambda facts, flows, _scope, cc, **_kw: (
+            {"schema_version": 1}
+            if facts is fake_facts and flows is fake_flows and cc is fake_cc
+            else {}
+        ),
+    )
+
+    def fake_write(payload, destination):
+        captured.update(payload=payload, destination=destination)
+        return "abc123"
+
+    monkeypatch.setattr(cli_module, "write_machine_export", fake_write)
+    monkeypatch.setattr(
+        cli_module,
+        "_serve",
+        lambda *_a, **_kw: pytest.fail("export mode must not start Flask"),
+    )
+
+    result = cli_module.main(["--export-json", "out.json", "repo"])
+    assert result == 0
+    assert captured == {
+        "payload": {"schema_version": 1},
+        "destination": "out.json",
+    }
+    assert "exported sha256 abc123" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # v0.10.0 Stage 2 removals — pin that the dead flags are gone
 # ---------------------------------------------------------------------------
@@ -429,100 +496,52 @@ def test_removed_flags_no_longer_parse(flag: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _bind_holder(port: int) -> socket.socket:
-    """Bind a real socket to ``(127.0.0.1, port)`` and return it.
-
-    Used to occupy a port for the duration of a test. The caller must
-    close the socket in a ``try/finally`` so the port is released even if
-    the assertion fails.
-
-    ``SO_REUSEADDR`` is intentionally NOT set here — we want a TRUE bind
-    so the cli's ``SO_REUSEADDR``-decorated probe still fails. (Two
-    sockets both with ``SO_REUSEADDR`` on the same host:port WILL both
-    bind on macOS / Linux, which would silently false-pass the test.)
-    """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind((SERVER_HOST, port))
-    sock.listen(1)
-    return sock
+def test_select_port_default_returns_8080_when_free(monkeypatch) -> None:
+    """The first available default candidate wins without host-port assumptions."""
+    probes: list[int] = []
+    monkeypatch.setattr(cli_module, "_bind_probe", probes.append)
+    assert _select_port(None) == DEFAULT_PORT
+    assert probes == [DEFAULT_PORT]
 
 
-def _find_free_port_above(start: int) -> int:
-    """Return a port we can bind right now, starting from ``start``.
+def test_select_port_default_skips_occupied_8080(monkeypatch, capsys) -> None:
+    """A controlled busy first candidate advances to the next free candidate."""
+    probes: list[int] = []
 
-    Used by tests that need to know an unused port without racing the
-    cli's own auto-select. We probe and immediately release; tests rely
-    on no other process grabbing the port between this call and the
-    next bind, which is realistic on a CI machine running one test at a
-    time.
-    """
-    for p in range(start, start + 64):
-        try:
-            _bind_probe(p)
-        except OSError:
-            continue
-        return p
-    raise RuntimeError(f"no free port in [{start}, {start + 64})")
+    def probe(port: int) -> None:
+        probes.append(port)
+        if port == DEFAULT_PORT:
+            raise OSError(errno.EADDRINUSE, "controlled occupied port")
+
+    monkeypatch.setattr(cli_module, "_bind_probe", probe)
+    assert _select_port(None) == DEFAULT_PORT + 1
+    assert probes == [DEFAULT_PORT, DEFAULT_PORT + 1]
+    assert capsys.readouterr().err == ""
 
 
-def test_select_port_default_returns_8080_when_free() -> None:
-    """No --port flag, 8080 free → return 8080. The auto-select probe
-    walks upward starting from DEFAULT_PORT; the first candidate is
-    DEFAULT_PORT itself.
-    """
-    # Pre-flight: skip cleanly if our test environment doesn't actually
-    # have 8080 free (some CI runners hold it). The test's subject is the
-    # function's behavior, not the environment, so a skip on an occupied
-    # 8080 is honest.
-    try:
-        _bind_probe(DEFAULT_PORT)
-    except OSError:
-        pytest.skip(f"port {DEFAULT_PORT} is occupied in the test environment")
-    chosen = _select_port(None)
-    assert chosen == DEFAULT_PORT
+def test_select_port_explicit_busy_is_hard_error(monkeypatch, capsys) -> None:
+    """An occupied explicit port fails without silently trying another port."""
+    probes: list[int] = []
+    busy = 12345
 
+    def probe(port: int) -> None:
+        probes.append(port)
+        raise OSError(errno.EADDRINUSE, "controlled occupied port")
 
-def test_select_port_default_skips_occupied_8080(capsys) -> None:
-    """No --port flag, 8080 occupied → auto-select picks the next free
-    port above 8080. The chosen port satisfies the bind probe; no error
-    is printed to stderr because auto-select treats EADDRINUSE as a
-    "keep walking" signal, not a hard failure.
-    """
-    holder = _bind_holder(DEFAULT_PORT)
-    try:
-        chosen = _select_port(None)
-    finally:
-        holder.close()
-    assert chosen is not None
-    assert chosen > DEFAULT_PORT
-    assert chosen < DEFAULT_PORT + 64  # within the probe window
-    err = capsys.readouterr().err
-    assert err == "", (
-        "auto-select must not print to stderr on a successful walk; " f"got: {err!r}"
-    )
-
-
-def test_select_port_explicit_busy_is_hard_error(capsys) -> None:
-    """``--port N`` explicit + N occupied → return None and print a clear
-    error. solflow MUST NOT silently reassign to N+1 (that would defeat
-    the point of asking for a specific port).
-    """
-    busy = _find_free_port_above(DEFAULT_PORT + 100)
-    holder = _bind_holder(busy)
-    try:
-        result = _select_port(busy)
-    finally:
-        holder.close()
-    assert result is None
+    monkeypatch.setattr(cli_module, "_bind_probe", probe)
+    assert _select_port(busy) is None
+    assert probes == [busy]
     err = capsys.readouterr().err
     assert f"--port {busy}" in err
     assert "already in use" in err
 
 
-def test_select_port_explicit_free_returns_that_port() -> None:
-    """``--port N`` explicit + N free → return N. No probing happens."""
-    free = _find_free_port_above(DEFAULT_PORT + 100)
-    assert _select_port(free) == free
+def test_select_port_explicit_free_returns_that_port(monkeypatch) -> None:
+    """An explicit available candidate is probed exactly once."""
+    probes: list[int] = []
+    monkeypatch.setattr(cli_module, "_bind_probe", probes.append)
+    assert _select_port(12345) == 12345
+    assert probes == [12345]
 
 
 def test_port_flag_default_is_none() -> None:

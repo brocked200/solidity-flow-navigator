@@ -15,9 +15,11 @@ from dataclasses import dataclass
 class SourceLocation:
     """Where a thing lives in the source.
 
-    Byte offsets, line numbers, and columns are taken verbatim from Slither's
-    ``source_mapping``. ``filename_absolute`` is the resolved absolute path on
-    disk; ``filename_relative`` is the path relative to the analyzed
+    Byte offsets come from Slither's ``source_mapping``. Line numbers and
+    byte columns are recomputed from retained compilation-input bytes when
+    available, preserving the adapter's actual newline convention. The
+    ``filename_absolute`` field is the resolved absolute
+    path on disk; ``filename_relative`` is the path relative to the analyzed
     repository root (``RepoFacts.repo_path``) — recomputed by Layer 1, NOT
     inherited from Slither's CWD-relative naming.
 
@@ -28,7 +30,7 @@ class SourceLocation:
 
     filename_absolute: str
     filename_relative: str  # relative to the analyzed repository root
-    start: int  # byte offset into the file (UTF-8)
+    start: int  # byte offset into compiler-input UTF-8
     length: int  # bytes
     lines: tuple[int, ...]  # 1-indexed line numbers covered, in order
     starting_column: int
@@ -75,6 +77,7 @@ class CallEdge:
 
     ``kind`` preserves Slither's SlithIR operation category VERBATIM:
         "internal"     - InternalCall (same contract or inherited)
+        "internal_dynamic" - InternalDynamicCall (function-pointer target)
         "high_level"   - HighLevelCall (call on another contract via its type)
         "library"      - LibraryCall (using-for or Library.fn(...))
         "low_level"    - LowLevelCall (.call / .delegatecall / .staticcall / .callcode)
@@ -108,6 +111,23 @@ class CallEdge:
     target_contract_name: str | None
     is_resolved: bool  # see docstring above for meaning per-kind
     source_location: SourceLocation  # location of the call site (statement-level)
+    # Native-value expression attached to the call, when Slither exposes one.
+    # Kept as source-adjacent display text rather than an interpreted amount:
+    # the expression may be a local variable or an SSA temporary.  Defaulted
+    # so existing synthetic fixtures and downstream callers remain compatible.
+    value_expression: str | None = None
+    # Actual syntax/receiver facts distinguish super/this from calls to a base
+    # or another instance. None preserves compatibility with synthetic facts
+    # that predate this metadata; extraction always sets explicit booleans.
+    is_super_call: bool | None = None
+    is_self_call: bool | None = None
+    # An explicit Base.function() qualifier selects that implementation rather
+    # than virtual dispatch. This is unrelated to the EVM STATICCALL opcode.
+    is_static_call: bool | None = None
+    # The callee's declaring contract, disambiguated across same-name files.
+    target_contract_uid: tuple[str, str] | None = None
+    # Static receiver type can differ from the inherited callee's declarer.
+    static_receiver_uid: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)

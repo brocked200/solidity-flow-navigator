@@ -16,6 +16,10 @@ from slither.core.declarations import Function as SlitherFunction
 from slither.core.declarations import FunctionContract
 from slither.core.declarations import Modifier as SlitherModifier
 from slither.core.declarations import Structure as SlitherStructure
+from slither.core.declarations.solidity_variables import SolidityVariable
+from slither.core.expressions.identifier import Identifier
+from slither.core.expressions.member_access import MemberAccess
+from slither.core.expressions.super_call_expression import SuperCallExpression
 from slither.core.solidity_types import (
     ArrayType,
     MappingType,
@@ -26,6 +30,7 @@ from slither.core.variables.state_variable import StateVariable
 from slither.slithir.operations import (
     HighLevelCall,
     InternalCall,
+    InternalDynamicCall,
     LibraryCall,
     LowLevelCall,
     NewContract,
@@ -58,6 +63,13 @@ def extract_facts(
 
     repo_root = Path(repo_path).resolve()
     slither = Slither(crytic_compile_obj)
+    # This cache belongs to one analysis, rather than a process-global path.
+    # Preserve the exact newlines retained by the compilation adapter: source
+    # mappings are byte offsets into that input, not normalized checkout text.
+    slither._solflow_source_bytes = {
+        path: text.encode("utf-8")
+        for path, text in getattr(slither, "source_code", {}).items()
+    }
     # Multi-unit builds (Hardhat hands Slither one compilation unit per source
     # file) repeat a contract in ``slither.contracts`` once per unit that
     # includes it, and every duplicate would produce an identical Flow per
@@ -188,7 +200,7 @@ def _build_function(
         returns=returns,
         modifier_names=modifier_names,
         source_location=_source_location(f.source_mapping, repo_root),
-        source_code=f.source_mapping.content or "",
+        source_code=_source_content(f.source_mapping),
         calls=calls,
         signature_type_canonical_names=signature_type_canonical_names,
     )
@@ -232,6 +244,20 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
         return _high_or_library_edge(op, repo_root, kind="high_level")
     if isinstance(op, InternalCall):
         return _internal_edge(op, repo_root)
+    if isinstance(op, InternalDynamicCall):
+        return CallEdge(
+            kind="internal_dynamic",
+            subkind=str(op.function_type),
+            target_canonical_name=None,
+            target_function_name=op.function.name,
+            target_contract_name=None,
+            is_resolved=False,
+            source_location=_op_location(op, repo_root),
+            value_expression=_value_expression(op),
+            is_super_call=False,
+            is_self_call=False,
+            is_static_call=False,
+        )
     if isinstance(op, LowLevelCall):
         return CallEdge(
             kind="low_level",
@@ -241,6 +267,10 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
             target_contract_name=None,
             is_resolved=False,
             source_location=_op_location(op, repo_root),
+            value_expression=_value_expression(op),
+            is_super_call=False,
+            is_self_call=False,
+            is_static_call=False,
         )
     if isinstance(op, SolidityCall):
         sf_name = op.function.name if op.function is not None else None
@@ -252,6 +282,10 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
             target_contract_name=None,
             is_resolved=False,
             source_location=_op_location(op, repo_root),
+            value_expression=_value_expression(op),
+            is_super_call=False,
+            is_self_call=False,
+            is_static_call=False,
         )
     if isinstance(op, Send):
         return CallEdge(
@@ -262,6 +296,10 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
             target_contract_name=None,
             is_resolved=False,
             source_location=_op_location(op, repo_root),
+            value_expression=_value_expression(op),
+            is_super_call=False,
+            is_self_call=False,
+            is_static_call=False,
         )
     if isinstance(op, Transfer):
         return CallEdge(
@@ -272,6 +310,10 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
             target_contract_name=None,
             is_resolved=False,
             source_location=_op_location(op, repo_root),
+            value_expression=_value_expression(op),
+            is_super_call=False,
+            is_self_call=False,
+            is_static_call=False,
         )
     if isinstance(op, NewContract):
         # NewContract.contract_name is a Slither UserDefinedType, not a Python
@@ -285,6 +327,10 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
             target_contract_name=str(raw) if raw is not None else None,
             is_resolved=False,
             source_location=_op_location(op, repo_root),
+            value_expression=_value_expression(op),
+            is_super_call=False,
+            is_self_call=False,
+            is_static_call=False,
         )
     return None
 
@@ -302,6 +348,12 @@ def _internal_edge(op: InternalCall, repo_root: Path) -> CallEdge:
         if isinstance(target_fn, FunctionContract) and target_fn.contract is not None
         else None
     )
+    called = getattr(op.expression, "called", None)
+    is_static = (
+        isinstance(called, MemberAccess)
+        and isinstance(called.expression, Identifier)
+        and isinstance(called.expression.value, SlitherContract)
+    )
     return CallEdge(
         kind="internal",
         subkind=None,
@@ -310,6 +362,10 @@ def _internal_edge(op: InternalCall, repo_root: Path) -> CallEdge:
         target_contract_name=target_contract,
         is_resolved=target_fn is not None,
         source_location=_op_location(op, repo_root),
+        is_super_call=isinstance(op.expression, SuperCallExpression),
+        is_self_call=False,
+        is_static_call=is_static,
+        target_contract_uid=_target_contract_uid(target_fn, repo_root),
     )
 
 
@@ -345,7 +401,63 @@ def _high_or_library_edge(op: HighLevelCall, repo_root: Path, *, kind: str) -> C
         target_contract_name=target_contract,
         is_resolved=target_fn is not None,
         source_location=_op_location(op, repo_root),
+        value_expression=_value_expression(op),
+        is_super_call=False,
+        is_static_call=False,
+        is_self_call=(
+            kind == "high_level"
+            and isinstance(op.destination, SolidityVariable)
+            and op.destination.name == "this"
+        ),
+        target_contract_uid=_target_contract_uid(target_fn, repo_root),
+        static_receiver_uid=_static_receiver_uid(op, repo_root),
     )
+
+
+def _target_contract_uid(target, repo_root: Path) -> tuple[str, str] | None:
+    if isinstance(target, FunctionContract):
+        return _contract_uid(target.contract_declarer, repo_root)
+    if isinstance(target, StateVariable):
+        return _contract_uid(target.contract, repo_root)
+    return None
+
+
+def _static_receiver_uid(op, repo_root: Path) -> tuple[str, str] | None:
+    receiver_type = getattr(getattr(op, "destination", None), "type", None)
+    if isinstance(receiver_type, UserDefinedType) and isinstance(
+        receiver_type.type, SlitherContract
+    ):
+        return _contract_uid(receiver_type.type, repo_root)
+    return None
+
+
+def _value_expression(op: Operation) -> str | None:
+    """Return Slither's native-value expression for a call, if present.
+
+    High/low-level calls, send/transfer and contract creation all expose a
+    ``call_value`` property in SlithIR.  We deliberately retain only its
+    stable textual form: this layer records facts and must not guess whether
+    a symbolic expression is zero or how much value reaches the runtime
+    target.
+    """
+
+    value = getattr(op, "call_value", None)
+    if value is not None:
+        return str(value)
+    if isinstance(op, InternalDynamicCall):
+        # Slither may omit call options on the lowered function-pointer IR,
+        # although the originating parsed call expression still retains them.
+        value = getattr(op.expression, "call_value", None)
+        if value is not None:
+            return str(value)
+    # Yul call/callcode carry native value as their third positional argument;
+    # delegatecall/staticcall have no native-value argument. Preserve the IR
+    # expression exactly, including a literal zero or symbolic temporary.
+    if isinstance(op, SolidityCall):
+        name = op.function.name if op.function is not None else ""
+        if name.startswith(("call(", "callcode(")) and len(op.arguments) >= 3:
+            return str(op.arguments[2])
+    return None
 
 
 def _build_synthetic_getter(
@@ -387,7 +499,7 @@ def _build_synthetic_getter(
         returns=(),
         modifier_names=(),
         source_location=_source_location(var.source_mapping, repo_root),
-        source_code=var.source_mapping.content or "",
+        source_code=_source_content(var.source_mapping),
         calls=(),
     )
 
@@ -400,19 +512,23 @@ def _build_free_functions(slither: Slither, repo_root: Path) -> tuple[Function, 
     ``Function`` shape — ``contract_declarer_name`` is the empty string,
     ``is_entry_point`` is False, modifiers/visibility quirks are absent.
 
-    Dedupes across compilation units by ``canonical_name`` defensively;
+    Dedupes across compilation units by source file and canonical name;
     Slither typically reports each free function once, but multiple
     compilation units can report overlapping declarations after some
     crytic-compile configurations.
     """
 
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     out: list[Function] = []
     for cu in slither.compilation_units:
         for f in cu.functions_top_level:
-            if f.canonical_name in seen:
+            key = (
+                _source_location(f.source_mapping, repo_root).filename_relative,
+                f.canonical_name,
+            )
+            if key in seen:
                 continue
-            seen.add(f.canonical_name)
+            seen.add(key)
             out.append(_build_function(f, repo_root, is_modifier=False))
     return tuple(out)
 
@@ -513,7 +629,7 @@ def _struct_def(s: SlitherStructure, repo_root: Path) -> TypeDef:
         canonical_name=_user_type_key(s),
         name=s.name,
         source_location=_source_location(s.source_mapping, repo_root),
-        source_code=s.source_mapping.content or "",
+        source_code=_source_content(s.source_mapping),
         member_type_canonical_names=tuple(dict.fromkeys(members)),
     )
 
@@ -524,7 +640,7 @@ def _enum_def(e: SlitherEnum, repo_root: Path) -> TypeDef:
         canonical_name=_user_type_key(e),
         name=e.name,
         source_location=_source_location(e.source_mapping, repo_root),
-        source_code=e.source_mapping.content or "",
+        source_code=_source_content(e.source_mapping),
     )
 
 
@@ -534,13 +650,98 @@ def _udvt_def(a: TypeAlias, repo_root: Path) -> TypeDef:
         canonical_name=_user_type_key(a),
         name=a.name,
         source_location=_source_location(a.source_mapping, repo_root),
-        source_code=a.source_mapping.content or "",
+        source_code=_source_content(a.source_mapping),
     )
 
 
 # ---------------------------------------------------------------------------
 # Source mapping helpers
 # ---------------------------------------------------------------------------
+
+
+def _compiler_source_bytes(sm) -> bytes | None:
+    """Return this mapping's compilation input, never a fresh checkout read.
+
+    Build-info adapters can retain different inputs for the same filename in
+    distinct compilation units. Prefer that unit's captured compiler input;
+    otherwise use Slither's source snapshot, preserving its exact bytes. The
+    cache is scoped to the Slither instance and cannot survive a later build.
+    """
+    unit = getattr(sm, "compilation_unit", None)
+    filename = str(sm.filename.absolute)
+    crytic_unit = getattr(unit, "crytic_compile_compilation_unit", None)
+    captured = getattr(crytic_unit, "_solflow_source_bytes", {})
+    if filename in captured:
+        return captured[filename]
+    core = getattr(unit, "core", None)
+    cached = getattr(core, "_solflow_source_bytes", {})
+    if filename in cached:
+        return cached[filename]
+    text = getattr(core, "source_code", {}).get(filename)
+    return text.encode("utf-8") if isinstance(text, str) else None
+
+
+def _compiler_source_slice(sm) -> bytes | None:
+    """Return the compiler-input byte slice addressed by ``sm``.
+
+    Sources unavailable from the compilation snapshot keep using Slither's
+    ``content`` field; no disk read or newline-conversion guess is made.
+    """
+
+    try:
+        source = _compiler_source_bytes(sm)
+        start = int(sm.start)
+        length = int(sm.length)
+    except (TypeError, ValueError):
+        return None
+
+    if source is None:
+        return None
+    end = start + length
+    if start < 0 or length < 0 or end > len(source):
+        return None
+    return source[start:end]
+
+
+def _source_content(sm) -> str:
+    """Decode a mapping from the exact compilation input's UTF-8 bytes."""
+
+    fragment = _compiler_source_slice(sm)
+    if fragment is not None:
+        try:
+            return fragment.decode("utf-8")
+        except UnicodeDecodeError:
+            pass
+    return sm.content or ""
+
+
+def _compiler_source_lines(sm) -> tuple[int, ...] | None:
+    """Compute the 1-indexed lines covered by exact compiler bytes.
+
+    Handle mixed LF/CRLF input without changing the mapping's byte offsets.
+    The last byte of a non-empty mapping is used because ``length`` is
+    end-exclusive; a trailing newline therefore remains attributed to the
+    declaration line rather than inventing an empty following line.
+    """
+
+    try:
+        source = _compiler_source_bytes(sm)
+        start = int(sm.start)
+        length = int(sm.length)
+    except (TypeError, ValueError):
+        return None
+
+    if source is None:
+        return None
+    end = start + length
+    if start < 0 or length < 0 or end > len(source):
+        return None
+
+    first_line = source.count(b"\n", 0, start) + 1
+    if length == 0:
+        return (first_line,)
+    last_line = source.count(b"\n", 0, end - 1) + 1
+    return tuple(range(first_line, last_line + 1))
 
 
 def _source_location(sm, repo_root: Path) -> SourceLocation:
@@ -552,14 +753,32 @@ def _source_location(sm, repo_root: Path) -> SourceLocation:
         # dependency referenced by absolute path). Fall back to the absolute
         # path so the field remains a usable filesystem reference.
         rel = str(abs_path)
+    columns = _compiler_source_columns(sm)
     return SourceLocation(
         filename_absolute=str(abs_path),
         filename_relative=rel,
         start=sm.start,
         length=sm.length,
-        lines=tuple(sm.lines),
-        starting_column=sm.starting_column,
-        ending_column=sm.ending_column,
+        lines=_compiler_source_lines(sm) or tuple(sm.lines),
+        starting_column=columns[0] if columns is not None else sm.starting_column,
+        ending_column=columns[1] if columns is not None else sm.ending_column,
+    )
+
+
+def _compiler_source_columns(sm) -> tuple[int, int] | None:
+    """Return 1-indexed byte columns from the same snapshot as the source."""
+    try:
+        source = _compiler_source_bytes(sm)
+        start = int(sm.start)
+        length = int(sm.length)
+    except (TypeError, ValueError):
+        return None
+    if source is None or start < 0 or length < 0 or start + length > len(source):
+        return None
+    end = start + length
+    return (
+        start - source.rfind(b"\n", 0, start),
+        end - source.rfind(b"\n", 0, end),
     )
 
 

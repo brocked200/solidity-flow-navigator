@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 import re
 import urllib.parse
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from flask.testing import FlaskClient
@@ -45,6 +47,23 @@ from solidity_flow_navigator.serve.app import (
     build_index,
     create_app,
 )
+
+
+def test_duplicate_flow_identity_fails_before_route_overwrite(tmp_path: Path) -> None:
+    from tests.test_machine_export import _analysis
+
+    facts, flows, scope, _ = _analysis(tmp_path / "repo")
+    other_location = replace(
+        flows[0].root.source_location, filename_relative="Other.sol"
+    )
+    other = replace(
+        flows[0],
+        root=replace(
+            flows[0].root, source_location=other_location, source_code="different body"
+        ),
+    )
+    with pytest.raises(ValueError, match="ambiguous Flow identity"):
+        create_app(facts, (*flows, other), scope=scope)
 
 
 @pytest.fixture(scope="module")
@@ -335,6 +354,8 @@ def test_build_index_returns_total_unresolved(
             ):
                 saw_one = True
                 assert ep.unresolved_count >= 0
+                assert ep.value_sink_count >= 0
+                assert ep.dynamic_dispatch_count >= 0
                 assert ep.max_depth >= 0
     assert saw_one
 
@@ -369,6 +390,8 @@ def test_build_index_entry_metadata_matches_source_flow(
             ):
                 src = by_url_id[ep.url_id]
                 assert ep.unresolved_count == src.unresolved_count
+                assert ep.value_sink_count == src.value_sink_count
+                assert ep.dynamic_dispatch_count == src.dynamic_dispatch_count
                 assert ep.max_depth == src.max_depth
                 saw_one = True
     assert saw_one

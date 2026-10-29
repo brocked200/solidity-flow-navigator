@@ -34,6 +34,16 @@ class UnresolvedReason(StrEnum):
     LOW_LEVEL_CALL = "low_level_call"  # §13.3 Solidity-level
     YUL_DYNAMIC_DISPATCH = "yul_dynamic_dispatch"  # §13.3 Yul-level
     ABSTRACT_NO_IMPLEMENTATION = "abstract_no_implementation"  # §11.5 (v0.3)
+    AMBIGUOUS_TARGET = "ambiguous_target"
+    INTERNAL_DYNAMIC_CALL = "internal_dynamic_call"
+
+
+class SinkKind(StrEnum):
+    """Terminal value/action sinks that have no callee body to recurse into."""
+
+    SEND = "send"
+    TRANSFER = "transfer"
+    NEW_CONTRACT = "new_contract"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,8 +72,8 @@ class FunctionNode:
     or any internally-called function, the two are equal.
 
     ``builtins_used`` collects ``CallEdge.subkind`` values for ``kind="solidity"``
-    edges that are NOT dynamic dispatch (per §13.3), plus folded markers for
-    ``send``/``transfer``/``new_contract`` edges (§11.9 v0 simplification). Order
+    edges that are NOT dynamic dispatch (per §13.3). Native-value and contract-
+    creation terminals are explicit ``SinkNode`` children, not builtins. Order
     and duplicates are preserved.
 
     ``call_site_line`` (v0.5 exploration; not in spec) is the 1-indexed
@@ -119,6 +129,10 @@ class FunctionNode:
     # is the ADDITIONAL signal the renderer badges. Optional + kw_only so
     # existing constructions stay valid.
     bound_via: "Binding | None" = field(default=None, kw_only=True)
+    # Native value attached to a resolved high-level call (``{value: x}``).
+    # None for roots, internal/library calls and calls without native value.
+    # This is display-only source-adjacent text, not an evaluated quantity.
+    call_value: str | None = field(default=None, kw_only=True)
     # User-defined types (structs, enums, value types) named by this node's
     # parameters and returns, plus the types a named struct references through
     # its members (spec §10.2, §11.3). A Layer 1 fact (``TypeDef``) passed
@@ -152,6 +166,8 @@ class UnresolvedNode:
     call_site: SourceLocation
     raw_kind: str
     raw_subkind: str | None
+    # Native value attached to an opaque call, when Slither exposes one.
+    value_expression: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,9 +186,28 @@ class ExternalNode:
     target_contract_name: str | None
     source_path: str  # repo-relative path of the dependency file
     call_site: SourceLocation
+    # Native value attached to this resolved-but-stubbed call.
+    value_expression: str | None = None
 
 
-FlowNode = FunctionNode | UnresolvedNode | ExternalNode
+@dataclass(frozen=True, slots=True)
+class SinkNode:
+    """A terminal transfer/deployment operation surfaced as an explicit node.
+
+    These operations are not unresolved: Slither knows exactly which language
+    primitive executes, but there is no Solidity callee body for Layer 2 to
+    recurse into.  Keeping them out of ``builtins_used`` makes value-moving
+    sites visible in the call tree without corrupting ``unresolved_count``.
+    """
+
+    node_type: Literal["sink"] = field(default="sink", kw_only=True)
+    kind: SinkKind
+    descriptor: str
+    call_site: SourceLocation
+    value_expression: str | None = None
+
+
+FlowNode = FunctionNode | UnresolvedNode | ExternalNode | SinkNode
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +241,10 @@ class Flow:
     ``max_depth`` is the maximum edge-distance from ``root`` to any leaf —
     a leaf-rooted Flow has ``max_depth == 0``. Same v0.8.0 derivation /
     consumer as ``unresolved_count``.
+
+    ``value_sink_count`` and ``dynamic_dispatch_count`` are orthogonal surface
+    facts. They prevent consumers from interpreting ``unresolved_count == 0``
+    as "no money-moving or opaque runtime boundary exists".
     """
 
     entry_point_declarer_canonical_name: str
@@ -215,3 +254,9 @@ class Flow:
     root: FunctionNode
     unresolved_count: int
     max_depth: int
+    # Orthogonal audit-surface metrics.  A Flow can have zero unresolved
+    # targets while still moving native value, or have dynamic dispatch that
+    # carries no value (e.g. delegatecall).  Defaults preserve constructions
+    # from older callers/tests.
+    value_sink_count: int = 0
+    dynamic_dispatch_count: int = 0

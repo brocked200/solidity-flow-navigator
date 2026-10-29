@@ -447,6 +447,11 @@
       );
       badges.appendChild(b);
     }
+    if (node.call_value != null) {
+      const b = el("span", "badge badge-sink", "value: " + node.call_value);
+      b.setAttribute("title", "native value attached to this resolved call");
+      badges.appendChild(b);
+    }
     if (badges.children.length > 0) {
       const head = el("div", "node-head");
       head.appendChild(badges);
@@ -519,6 +524,11 @@
 
     const badges = el("span", "node-badges");
     badges.appendChild(el("span", "badge badge-unresolved", node.reason));
+    if (node.value_expression != null) {
+      badges.appendChild(
+        el("span", "badge badge-sink", "value: " + node.value_expression),
+      );
+    }
     head.appendChild(badges);
     wrap.appendChild(head);
     appendBindingControl(wrap, node);
@@ -547,6 +557,32 @@
     }
     head.appendChild(title);
     head.appendChild(el("span", "node-path", node.source_path));
+    if (node.value_expression != null) {
+      const badges = el("span", "node-badges");
+      badges.appendChild(
+        el("span", "badge badge-sink", "value: " + node.value_expression),
+      );
+      head.appendChild(badges);
+    }
+    wrap.appendChild(head);
+    return wrap;
+  }
+
+  function renderSinkNode(node) {
+    const wrap = el("div", "node node--sink node--pill");
+    wrap.setAttribute("title", node.descriptor || node.kind || "sink");
+    const head = el("div", "node-head");
+    const title = el("span", "node-title");
+    title.appendChild(el("code", null, shortenSignature(node.descriptor || node.kind)));
+    head.appendChild(title);
+    const badges = el("span", "node-badges");
+    badges.appendChild(el("span", "badge badge-sink", node.kind));
+    if (node.value_expression != null) {
+      badges.appendChild(
+        el("span", "badge badge-sink", "value: " + node.value_expression),
+      );
+    }
+    head.appendChild(badges);
     wrap.appendChild(head);
     return wrap;
   }
@@ -555,6 +591,7 @@
     if (node.node_type === "function") return renderFunctionNode(node);
     if (node.node_type === "unresolved") return renderUnresolvedNode(node);
     if (node.node_type === "external") return renderExternalNode(node);
+    if (node.node_type === "sink") return renderSinkNode(node);
     throw new Error("flow-progressive.js: unknown node_type " + node.node_type);
   }
 
@@ -754,6 +791,13 @@
   function nameForCall(child) {
     if (child.node_type === "function") return child.name;
     if (child.node_type === "external") return child.target_function_name;
+    if (child.node_type === "sink") {
+      if (child.kind === "new_contract") {
+        const m = (child.descriptor || "").match(/new\s+([A-Za-z_][A-Za-z0-9_]*)/);
+        return m ? m[1] : null;
+      }
+      return child.kind;
+    }
     if (child.node_type === "unresolved") {
       // descriptors look like "ITransferable.foo(...)" or "<address>.call(...)" —
       // the call name token in source would be the function name only.
@@ -2411,6 +2455,9 @@
         name: node.target_function_name + "(...)",
       };
     }
+    if (node.node_type === "sink") {
+      return { prefix: "", name: node.descriptor || node.kind || "sink" };
+    }
     // unresolved: split the descriptor at the contract/method boundary if any.
     const d = node.descriptor || "unresolved";
     const head = d.indexOf("(") === -1 ? d : d.slice(0, d.indexOf("("));
@@ -2448,6 +2495,7 @@
   function ctTypeClass(node) {
     if (node.node_type === "unresolved") return "calltree-row--unresolved";
     if (node.node_type === "external") return "calltree-row--external";
+    if (node.node_type === "sink") return "calltree-row--sink";
     if (isModifierNode(node)) return "calltree-row--modifier";
     return "calltree-row--function";
   }
