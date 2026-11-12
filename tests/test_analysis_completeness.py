@@ -567,3 +567,37 @@ def test_export_scope_carries_dependency_paths(tmp_path) -> None:
     assert wide["scope_sha256"] != narrow["scope_sha256"], (
         "a scope rule that changes which roots exist must change the scope hash"
     )
+
+
+# --------------------------------------------------------------------------
+# serve/ must not disagree with the export
+# --------------------------------------------------------------------------
+
+
+def test_served_pages_warn_about_a_partial_analysis() -> None:
+    """The CLI refuses to serve a partial analysis, so reaching the UI means
+    --allow-partial-analysis was passed. The degraded Flows then render as
+    ordinary complete-looking rows and the one-time stderr warning has
+    scrolled away, so the warning has to be in the page."""
+    base = Path("src/solidity_flow_navigator/serve/templates/base.html").read_text()
+    assert "partial-analysis-banner" in base
+    assert "analysis.degraded_functions" in base
+
+    app_src = Path("src/solidity_flow_navigator/serve/app.py").read_text()
+    start = app_src.index("def _inject_globals()")
+    ctx = app_src[start : app_src.index("@app.after_request", start)]
+    assert '"analysis": getattr(facts, "analysis", None)' in ctx, (
+        "the completeness report must reach the template context"
+    )
+
+
+def test_serve_rejects_a_binding_the_cli_treats_as_fatal() -> None:
+    """Serve was fail-open where the CLI is fail-closed: /bind/ accepted any
+    contract name, and /bindings/save would then persist a solflow.toml the
+    CLI refuses with INTERFACE_BINDING_FAILED."""
+    app_src = Path("src/solidity_flow_navigator/serve/app.py").read_text()
+    start = app_src.index('contract = request.args.get("contract", "")')
+    handler = app_src[start : app_src.index("def save_bindings", start)]
+    assert "candidates_by_iface.get(iface, ())" in handler, (
+        "an unknown contract must be rejected before _rebuild commits it"
+    )

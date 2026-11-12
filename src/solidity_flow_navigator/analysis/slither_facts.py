@@ -215,11 +215,12 @@ def _capture_ir_failures():
             failures.append(f"{name}: {type(exc).__name__}: {exc}")
             raise
 
-    _SlitherFunction.generate_slithir_and_analyze = _observed  # type: ignore[method-assign]
+    # type: ignore[method-assign] -- deliberate scoped patch, restored below.
+    _SlitherFunction.generate_slithir_and_analyze = _observed  # type: ignore
     try:
         yield failures
     finally:
-        _SlitherFunction.generate_slithir_and_analyze = original  # type: ignore[method-assign]
+        _SlitherFunction.generate_slithir_and_analyze = original  # type: ignore
 
 
 @contextmanager
