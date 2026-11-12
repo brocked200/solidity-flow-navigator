@@ -628,6 +628,13 @@ def create_app(
         )
         return {
             "repo_path": facts.repo_path,
+            # The CLI refuses to serve a partial analysis, so reaching the UI
+            # at all means either the analysis was complete or the operator
+            # passed --allow-partial-analysis. In the second case the degraded
+            # functions render as ordinary complete-looking rows, and the
+            # one-time stderr warning has long scrolled away -- so the banner
+            # has to live in the page.
+            "analysis": getattr(facts, "analysis", None),
             "expand_all": expand_all,
             "theme": forced,
             "current_theme": forced or "auto",
@@ -787,6 +794,17 @@ def create_app(
         # local path) — the Flow reloads with the node resolved.
         iface = urllib.parse.unquote(iface)
         contract = request.args.get("contract", "")
+        # Fail CLOSED, as the CLI does. cli.py aborts the whole run on
+        # INTERFACE_BINDING_FAILED, so accepting an unknown contract here would
+        # let the browser persist (via /bindings/save) a solflow.toml that the
+        # CLI then refuses -- and the failure is invisible in every aggregate
+        # the UI shows, because the failed binding replaces an UnresolvedNode
+        # that was already unresolved for another reason. flow/types.py states
+        # the intent: a wrong or typo'd binding is a loud error, never a silent
+        # fall-back.
+        if contract and contract != "__none__":
+            if contract not in candidates_by_iface.get(iface, ()):
+                return redirect(_safe_next(request.args.get("next")) + "?bind=error")
         pairs = [(i, c) for (i, c) in current_scope.interface_bindings if i != iface]
         if contract and contract != "__none__":
             pairs.append((iface, contract))

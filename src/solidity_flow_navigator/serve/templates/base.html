@@ -30,6 +30,20 @@
       <a class="theme-seg" href="{{ url_for('set_theme', value='dark', next=request.path) }}"{% if current_theme == 'dark' %} aria-current="true"{% endif %}>Dark</a>
     </nav>
   </header>
+  {% if analysis is defined and analysis and not analysis.complete %}
+  {# Partial analysis: every page carries this, because any Flow on any page
+     may be one of the degraded ones and nothing else marks it. #}
+  <div class="partial-analysis-banner" role="alert">
+    <strong>Partial analysis.</strong>
+    The analyzer could not fully process
+    {{ analysis.degraded_functions | length }}
+    item{{ 's' if analysis.degraded_functions | length != 1 }}, so the Flows
+    below understate what the code does. Read these by hand:
+    <ul>
+      {% for name in analysis.degraded_functions %}<li><code>{{ name }}</code></li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
   <main class="site-main">
     {% block content %}{% endblock %}
   </main>

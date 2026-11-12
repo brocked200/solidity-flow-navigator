@@ -80,6 +80,10 @@ def test_default_scope_matches_spec_11_2() -> None:
     ``exclude_contracts`` from prefix-only ``Mock*`` to wildcard ``*Mock*``
     so suffix conventions (``ERC20Mock``) match too. ``stub_paths`` is the
     new v0.2 field, defaulting empty.
+
+    Vendored dependency trees are NOT here: they live in ``dependency_paths``,
+    which suppresses their Flow roots without making them ineligible as
+    explicit ``--bind`` targets the way ``exclude_paths`` does.
     """
 
     assert DEFAULT_SCOPE.exclude_paths == (
