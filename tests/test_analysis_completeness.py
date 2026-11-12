@@ -86,8 +86,7 @@ def test_capture_leaves_global_logging_state_exactly_as_found() -> None:
     before = (target.level, target.disabled, target.propagate, list(target.handlers))
     with _capture_analysis_diagnostics():
         pass
-    after = (target.level, target.disabled, target.propagate,
-             list(target.handlers))
+    after = (target.level, target.disabled, target.propagate, list(target.handlers))
     assert after == before
     assert (root.level, list(root.handlers)) == root_before, (
         "the root logger must not be touched: raising its level changes what "
@@ -194,21 +193,21 @@ def test_allow_partial_analysis_opts_back_in(monkeypatch, tmp_path, capsys):
     _cli_with_facts(
         monkeypatch,
         tmp_path,
-        AnalysisReport(complete=False, degraded_functions=("A.b()",),
-                       diagnostics=("boom",)),
+        AnalysisReport(
+            complete=False, degraded_functions=("A.b()",), diagnostics=("boom",)
+        ),
     )
     exported: dict = {}
     monkeypatch.setattr(
-        cli, "build_machine_export",
+        cli,
+        "build_machine_export",
         lambda *_a, **_k: exported.setdefault("payload", {"ok": True}),
     )
-    rc = cli.main(
-        ["repo", "--export-json", "out.json", "--allow-partial-analysis"]
-    )
+    rc = cli.main(["repo", "--export-json", "out.json", "--allow-partial-analysis"])
     assert rc == 0, "the opt-in must still produce an export"
-    assert "analysis incomplete" in capsys.readouterr().err, (
-        "opting in must not silence the warning"
-    )
+    assert (
+        "analysis incomplete" in capsys.readouterr().err
+    ), "opting in must not silence the warning"
 
 
 # --------------------------------------------------------------------------
@@ -216,31 +215,20 @@ def test_allow_partial_analysis_opts_back_in(monkeypatch, tmp_path, capsys):
 # --------------------------------------------------------------------------
 
 
-def _function_node(canonical: str, filename: str, receiver: str = "Math"):
-    return SimpleNamespace(
-        canonical_name=canonical,
-        invoked_via_contract_name=receiver,
-        source_location=SimpleNamespace(filename_relative=filename),
-    )
-
-
-def test_same_name_in_two_vendored_trees_are_distinct_identities(monkeypatch):
+def test_same_name_in_two_vendored_trees_are_distinct_identities():
     """Two OpenZeppelin majors declare Math.max; they are not the same callee.
 
     Without the file in the key, both collapse to one identity and the dedup in
     _process_calls discards an entire distinct callee subtree with no warning.
     """
-    from solidity_flow_navigator.flow import builder as builder_mod
-
-    a = _function_node(
+    a = _real_function_node(
         "Math.max(uint256,uint256)",
         "node_modules/@openzeppelin/contracts/utils/math/Math.sol",
     )
-    b = _function_node(
+    b = _real_function_node(
         "Math.max(uint256,uint256)",
         "node_modules/@openzeppelin/contracts-v4/utils/math/Math.sol",
     )
-    monkeypatch.setattr(builder_mod, "FunctionNode", SimpleNamespace, raising=True)
     assert _child_identity(a) != _child_identity(b)
 
 
@@ -255,9 +243,9 @@ def test_vendored_deps_suppress_flow_roots_without_blocking_bindings() -> None:
     unbindable and aborted the CLI. The two concepts are separate fields."""
     vendored = "node_modules/@openzeppelin/contracts/utils/math/Math.sol"
     assert dependency_path(DEFAULT_SCOPE, vendored) is True
-    assert path_excluded(DEFAULT_SCOPE, vendored) is False, (
-        "a vendored contract must stay eligible as an explicit --bind target"
-    )
+    assert (
+        path_excluded(DEFAULT_SCOPE, vendored) is False
+    ), "a vendored contract must stay eligible as an explicit --bind target"
     assert "**/node_modules/**" not in DEFAULT_SCOPE.exclude_paths
     # lib/** is deliberately not a dependency default: inline_libraries
     # addresses lib/{name}/** and excluding it loses in-tree library Flows.
@@ -283,7 +271,8 @@ def test_duplicate_identity_error_names_the_offenders(monkeypatch, tmp_path, cap
         lambda *_: (_flow("node_modules/a/Math.sol"), _flow("node_modules/b/Math.sol")),
     )
     monkeypatch.setattr(
-        cli, "build_machine_export",
+        cli,
+        "build_machine_export",
         lambda *_a, **_k: pytest.fail("ambiguous identities must abort"),
     )
     assert cli.main(["repo", "--export-json", "out.json"]) == 1
@@ -294,15 +283,11 @@ def test_duplicate_identity_error_names_the_offenders(monkeypatch, tmp_path, cap
     assert "node_modules/b/Math.sol" in err
     assert "--exclude-path" in err, "tell the user which flag fixes it"
 
-def _real_function_node(canonical: str, filename: str):
-    """A genuine FunctionNode, not a stand-in.
 
-    The monkeypatched test above proves the KEY changed; this one proves the
-    production type actually carries the attribute the key now reads, and that
-    the dedup the key exists to perform still works.
-    """
-    from solidity_flow_navigator.flow.types import FunctionNode
+def _real_function_node(canonical: str, filename: str):
+    """Build the production node type with declaration and receiver metadata."""
     from solidity_flow_navigator.analysis.types import SourceLocation
+    from solidity_flow_navigator.flow.types import FunctionNode
 
     return FunctionNode(
         canonical_name=canonical,
@@ -310,6 +295,7 @@ def _real_function_node(canonical: str, filename: str):
         full_name="max(uint256,uint256)",
         declarer_contract_name="Math",
         invoked_via_contract_name="Math",
+        invoked_via_contract_file=filename,
         invoked_via_super=False,
         is_modifier=False,
         visibility="internal",
@@ -338,6 +324,7 @@ def test_real_function_node_carries_the_file_the_identity_reads() -> None:
         "fn",
         "a/Math.sol",
         "Math.max(uint256,uint256)",
+        "a/Math.sol",
         "Math",
     )
 
@@ -361,8 +348,8 @@ def test_external_nodes_from_different_dependency_files_stay_distinct() -> None:
     """The motivating case: MathV4.max(a,b) + MathV5.max(a,b) on one statement.
     node_modules targets are stubbed as ExternalNode, so fixing only
     FunctionNode left the original defect in place."""
-    from solidity_flow_navigator.flow.types import ExternalNode
     from solidity_flow_navigator.analysis.types import SourceLocation
+    from solidity_flow_navigator.flow.types import ExternalNode
 
     def _ext(path: str):
         return ExternalNode(
@@ -371,8 +358,13 @@ def test_external_nodes_from_different_dependency_files_stay_distinct() -> None:
             target_contract_name="Math",
             source_path=path,
             call_site=SourceLocation(
-                filename_absolute="/a.sol", filename_relative="a.sol",
-                start=0, length=1, lines=(1,), starting_column=1, ending_column=2,
+                filename_absolute="/a.sol",
+                filename_relative="a.sol",
+                start=0,
+                length=1,
+                lines=(1,),
+                starting_column=1,
+                ending_column=2,
             ),
         )
 
@@ -394,9 +386,7 @@ def test_analysis_report_reaches_the_hashed_export_core(tmp_path) -> None:
 
     facts, flows, scope, compilation = _export_fixture(tmp_path / "repo")
 
-    clean = build_machine_export(
-        facts, flows, scope, compilation, tool_version="test"
-    )
+    clean = build_machine_export(facts, flows, scope, compilation, tool_version="test")
     degraded_facts = dataclasses.replace(
         facts,
         analysis=AnalysisReport(
@@ -412,9 +402,9 @@ def test_analysis_report_reaches_the_hashed_export_core(tmp_path) -> None:
     assert clean["analysis"]["complete"] is True
     assert degraded["analysis"]["complete"] is False
     assert degraded["analysis"]["degraded_functions"] == ["A.f()"]
-    assert clean["payload_sha256"] != degraded["payload_sha256"], (
-        "the completeness of the analysis must be inside the hashed core"
-    )
+    assert (
+        clean["payload_sha256"] != degraded["payload_sha256"]
+    ), "the completeness of the analysis must be inside the hashed core"
 
 
 def test_a_host_filter_makes_capture_unverified() -> None:
@@ -458,8 +448,12 @@ def test_same_declaration_via_different_receivers_stays_distinct() -> None:
     b = _real_function_node("Base.f()", "src/Base.sol")
     import dataclasses
 
-    a = dataclasses.replace(a, invoked_via_contract_name="D1")
-    b = dataclasses.replace(b, invoked_via_contract_name="D2")
+    a = dataclasses.replace(
+        a, invoked_via_contract_name="D1", invoked_via_contract_file="src/D1.sol"
+    )
+    b = dataclasses.replace(
+        b, invoked_via_contract_name="D2", invoked_via_contract_file="src/D2.sol"
+    )
     assert _child_identity(a) != _child_identity(b)
     assert _child_identity(a) == _child_identity(
         dataclasses.replace(a, invoked_via_contract_name="D1")
@@ -488,8 +482,9 @@ def test_ir_failures_are_seen_even_with_logging_fully_disabled() -> None:
     """The gap the previous two rounds could not close: a host that suppresses
     logging for the whole of Slither(cc). Direct observation of the abort does
     not care about logging policy at all."""
-    from solidity_flow_navigator.analysis.slither_facts import _capture_ir_failures
     from slither.core.declarations.function import Function as SlitherFunction
+
+    from solidity_flow_navigator.analysis.slither_facts import _capture_ir_failures
 
     class _Node:
         def slithir_generation(self):
@@ -516,16 +511,15 @@ def test_ir_failures_are_seen_even_with_logging_fully_disabled() -> None:
     assert failures, "an IR abort must be observed with logging fully disabled"
     assert failures[0].startswith("Top.scale(uint256,uint256):")
 
-    report = _build_analysis_report(
-        [], Path("/repo"), ir_failures=tuple(failures)
-    )
+    report = _build_analysis_report([], Path("/repo"), ir_failures=tuple(failures))
     assert report.complete is False
     assert "Top.scale(uint256,uint256)" in report.degraded_functions
 
 
 def test_the_wrap_is_removed_afterwards() -> None:
-    from solidity_flow_navigator.analysis.slither_facts import _capture_ir_failures
     from slither.core.declarations.function import Function as SlitherFunction
+
+    from solidity_flow_navigator.analysis.slither_facts import _capture_ir_failures
 
     before = SlitherFunction.generate_slithir_and_analyze
     with _capture_ir_failures():
@@ -564,9 +558,9 @@ def test_export_scope_carries_dependency_paths(tmp_path) -> None:
 
     assert "dependency_paths" in wide["scope"]
     assert wide["scope"] != narrow["scope"]
-    assert wide["scope_sha256"] != narrow["scope_sha256"], (
-        "a scope rule that changes which roots exist must change the scope hash"
-    )
+    assert (
+        wide["scope_sha256"] != narrow["scope_sha256"]
+    ), "a scope rule that changes which roots exist must change the scope hash"
 
 
 # --------------------------------------------------------------------------
@@ -586,9 +580,9 @@ def test_served_pages_warn_about_a_partial_analysis() -> None:
     app_src = Path("src/solidity_flow_navigator/serve/app.py").read_text()
     start = app_src.index("def _inject_globals()")
     ctx = app_src[start : app_src.index("@app.after_request", start)]
-    assert '"analysis": getattr(facts, "analysis", None)' in ctx, (
-        "the completeness report must reach the template context"
-    )
+    assert (
+        '"analysis": getattr(facts, "analysis", None)' in ctx
+    ), "the completeness report must reach the template context"
 
 
 def test_serve_rejects_a_binding_the_cli_treats_as_fatal() -> None:
@@ -611,8 +605,10 @@ def test_one_failure_is_named_once_not_twice() -> None:
     report = _build_analysis_report(
         [REAL_IR_ERROR],
         Path("/repo"),
-        ir_failures=("FxUSDBasePool.arbitrage(address,uint256,address,bytes): "
-                     "AttributeError: boom",),
+        ir_failures=(
+            "FxUSDBasePool.arbitrage(address,uint256,address,bytes): "
+            "AttributeError: boom",
+        ),
         structurally_incomplete=("FxUSDBasePool <incomplete>",),
     )
     names = report.degraded_functions

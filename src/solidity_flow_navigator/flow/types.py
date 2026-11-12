@@ -65,11 +65,12 @@ class Binding:
 class FunctionNode:
     """A resolved function or modifier in the call tree.
 
-    ``invoked_via_contract_name`` records the contract through which this
-    function was reached for the current Flow. For a Flow root that is an
-    inherited entry point, this differs from ``declarer_contract_name`` (the
-    contract that actually declared the function); for a non-inherited root
-    or any internally-called function, the two are equal.
+    ``invoked_via_contract_name`` and ``invoked_via_contract_file`` record the
+    receiver's uid: the contract through which this function was reached.
+    The file is optional for compatibility with manually constructed nodes;
+    the builder always sets it. For a Flow root that is an inherited entry
+    point, the receiver name differs from ``declarer_contract_name`` (the
+    contract that actually declared the function).
 
     ``builtins_used`` collects ``CallEdge.subkind`` values for ``kind="solidity"``
     edges that are NOT dynamic dispatch (per §13.3). Native-value and contract-
@@ -106,6 +107,7 @@ class FunctionNode:
     full_name: str
     declarer_contract_name: str
     invoked_via_contract_name: str
+    invoked_via_contract_file: str | None = field(default=None, kw_only=True)
     invoked_via_super: bool
     is_modifier: bool
     visibility: str  # "external" | "public" | "internal" | "private"

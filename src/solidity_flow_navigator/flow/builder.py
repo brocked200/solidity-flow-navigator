@@ -28,8 +28,8 @@ from .scope import (
     Scope,
     binding_for,
     contract_excluded,
-    library_inlined,
     dependency_path,
+    library_inlined,
     path_excluded,
     target_stubbed,
 )
@@ -329,6 +329,9 @@ class _FlowBuilder:
                 full_name=entry_func.full_name,
                 declarer_contract_name=entry_func.contract_declarer_name,
                 invoked_via_contract_name=invoker_contract.name,
+                invoked_via_contract_file=(
+                    invoker_contract.source_location.filename_relative
+                ),
                 invoked_via_super=False,
                 is_modifier=False,
                 visibility=entry_func.visibility,
@@ -468,13 +471,14 @@ class _FlowBuilder:
             # v0: implicit cycle termination per spec §11.10. Renderer can
             # spot the cycle by matching canonical_name against an ancestor.
             return self._terminal_function_node(
-                func,
-                invoker_name,
-                invoked_via_super,
-                call_site_line,
-                call_kind,
-                bound_via,
-                call_value,
+                func=func,
+                invoked_via=invoker_name,
+                invoked_via_file=self._invoker_file(),
+                invoked_via_super=invoked_via_super,
+                call_site_line=call_site_line,
+                call_kind=call_kind,
+                bound_via=bound_via,
+                call_value=call_value,
             )
 
         new_path = path | {key}
@@ -491,6 +495,7 @@ class _FlowBuilder:
             full_name=func.full_name,
             declarer_contract_name=func.contract_declarer_name,
             invoked_via_contract_name=invoker_name,
+            invoked_via_contract_file=self._invoker_file(),
             invoked_via_super=invoked_via_super,
             is_modifier=func.is_modifier,
             visibility=func.visibility,
@@ -514,6 +519,8 @@ class _FlowBuilder:
         func: Function,
         invoked_via: str,
         invoked_via_super: bool,
+        *,
+        invoked_via_file: str,
         call_site_line: int | None = None,
         call_kind: str | None = None,
         bound_via: Binding | None = None,
@@ -525,6 +532,7 @@ class _FlowBuilder:
             full_name=func.full_name,
             declarer_contract_name=func.contract_declarer_name,
             invoked_via_contract_name=invoked_via,
+            invoked_via_contract_file=invoked_via_file,
             invoked_via_super=invoked_via_super,
             is_modifier=func.is_modifier,
             visibility=func.visibility,
@@ -550,6 +558,11 @@ class _FlowBuilder:
         """
 
         return self._require_invoker().name
+
+    def _invoker_file(self) -> str:
+        """Return the current invoker's declaring file, completing its uid."""
+
+        return self._require_invoker().source_location.filename_relative
 
     def _require_invoker(self) -> Contract:
         """Return the current Flow's invoker ``Contract``, asserting it is set."""
@@ -1436,10 +1449,11 @@ def _edge_mapping_key(edge: CallEdge) -> tuple:
 def _child_identity(node: FlowNode) -> tuple:
     """Target identity used as the non-mapping half of the v0.10.2 dedup key.
 
-    For ``FunctionNode`` and ``ExternalNode`` the identity is the resolved
-    canonical name — post-§11.5 virtual-dispatch resolution for function
-    nodes, so two duplicated edges that re-resolve through the same C3
-    chain compare equal. For ``UnresolvedNode`` no canonical name exists;
+    For ``FunctionNode`` the identity includes the declaring file, resolved
+    canonical name, and receiver uid — post-§11.5 virtual dispatch, so two
+    duplicated edges through the same receiver compare equal. External nodes
+    use their source path and canonical name. For ``UnresolvedNode`` no
+    canonical name exists;
     we use ``(raw_kind, raw_subkind, descriptor)`` so two unresolved
     children dedupe only when they came from the same kind of opaque
     dispatch with the same descriptor — e.g. an interface call duplicated
@@ -1465,7 +1479,9 @@ def _child_identity(node: FlowNode) -> tuple:
             # statement -- identical on every other component -- yet their
             # subtrees differ because virtual dispatch below them resolves
             # against different receivers. Without this the second subtree is
-            # silently discarded.
+            # silently discarded. Include the file as well as the name because
+            # distinct receivers can themselves share a name across files.
+            node.invoked_via_contract_file,
             node.invoked_via_contract_name,
         )
     if isinstance(node, ExternalNode):
