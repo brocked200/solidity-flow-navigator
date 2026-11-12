@@ -12,6 +12,7 @@ Schema version `1` contains:
   supplied by Hardhat/Foundry, and compiler-binary SHA-256 with explicit
   provenance;
 - normalized scope configuration, interface-binding assumptions, and digest;
+- an `analysis` object recording analyzer losses and capture diagnostics;
 - per-entry-point Flow trees;
 - a flat edge inventory containing resolved calls, unresolved/dynamic calls,
   external stubs, explicit sinks, and native-value expressions;
@@ -46,6 +47,55 @@ source-site counts. Unresolved nodes, binding assumptions, and dynamic dispatch
 remain audit limitations even when a Flow has zero other unresolved calls.
 Duplicate entry-point identities are rejected before UI routing or export can
 silently overwrite or conflate a Flow.
+
+## Analyzer errors and partial output
+
+By default an observed analyzer error or unverified diagnostic capture makes
+the CLI exit `1` before writing an export or starting the UI. Compilation
+errors are always fatal. To deliberately inspect a partial result, pass
+`--allow-partial-analysis` and treat its reported losses as **UNREAD**.
+
+`analysis` contains:
+
+- `complete`: whether this extraction observed no losses and its diagnostic
+  capture remained verified;
+- `degraded_functions`: ordered, deduplicated known functions whose IR
+  generation failed;
+- `diagnostics`: ordered, deduplicated analyzer and capture messages.
+
+The `analysis.complete` signal describes the analyzer run, not the completeness
+of the runtime call graph. Unresolved targets, stubs and binding assumptions
+remain separate limitations. An empty function list is insufficient: an empty
+AST or unresolved parser reference can lose information without identifying a
+function. Inspect both `complete` and `diagnostics`.
+
+For Slither 0.11.6, IR-generation aborts, empty-AST handling and unresolved
+exported references have direct observation hooks scoped to extraction. Those
+paths remain visible when logging is disabled entirely within construction.
+Other analyzer errors still rely on log capture and its integrity checks;
+this is not a guarantee that every future or internally suppressed diagnostic
+will be observed.
+
+## Scope and receiver identity
+
+`scope.dependency_paths` records the effective, ordered dependency-root
+patterns. The default is `["**/node_modules/**"]`. These patterns suppress
+Flow roots only; they do not affect compilation or explicit binding
+eligibility. `--dependency-path` appends patterns; a config value of `[]`
+clears the default. `exclude_paths` is stricter and also gates binding targets.
+
+Each function node adds optional `invoked_via_contract_file`, the portable
+source alias of its receiver's declaring file. Together with
+`invoked_via_contract_name`, it identifies the receiver across same-name
+contracts in distinct files, including cycle terminals. Consumers of older
+artifacts may encounter an absent value; synthetic nodes may carry `null`.
+
+Schema version remains `1` because these are additive fields. The always-present
+`analysis` and `scope.dependency_paths` additions changed `payload_sha256` for
+all artifacts, even complete runs. The receiver-file field also changes the
+hashed Flow trees. Old and new payload digests are therefore not comparable
+as unchanged evidence; regenerate artifacts with the same sources, compiler,
+scope and tool revision when comparing bytes.
 
 The artifact includes source bodies and may contain private code. Store and
 share it under the target's confidentiality policy.

@@ -191,9 +191,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--allow-partial-analysis",
         action="store_true",
         help=(
-            "Export even when the analyzer reported errors. The export then "
-            "carries analysis.complete=false and names every degraded "
-            "function; treat those as UNREAD and read them by hand."
+            "Opt in to partial analysis. By default analyzer errors exit 1 "
+            "before export or serving. Partial output records "
+            "analysis.complete=false and known degraded_functions; treat "
+            "those functions and diagnostic losses as UNREAD."
         ),
     )
     scope_group.add_argument(
@@ -371,8 +372,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 "solflow: refusing to emit evidence from a partial analysis; "
                 "pass --allow-partial-analysis to export anyway (the export "
-                "then records analysis.complete=false and names every "
-                "degraded function).",
+                "then records analysis.complete=false, known degraded "
+                "functions, and diagnostics).",
                 file=sys.stderr,
             )
             return 1
@@ -397,8 +398,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         for name, files in sorted(dupes.items())[:20]:
-            print(f"solflow:   {name} declared in {', '.join(sorted(set(files)))}",
-                  file=sys.stderr)
+            print(
+                f"solflow:   {name} declared in {', '.join(sorted(set(files)))}",
+                file=sys.stderr,
+            )
         if len(dupes) > 20:
             print(f"solflow:   ... and {len(dupes) - 20} more", file=sys.stderr)
         print(
