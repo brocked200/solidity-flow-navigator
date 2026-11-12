@@ -44,6 +44,8 @@ from slither.slithir.operations import (
     Transfer,
 )
 
+from .slither_resolver import contract_id_resolution
+from .slither_type_ids import type_id_resolution
 from .types import (
     AnalysisReport,
     CallEdge,
@@ -67,11 +69,13 @@ def extract_facts(
     """
 
     repo_root = Path(repo_path).resolve()
-    with _capture_ir_failures() as _ir_failures:
-        with _capture_parser_losses() as _parser_losses:
-            with _capture_analysis_diagnostics() as (_diagnostics, _status):
-                slither = Slither(crytic_compile_obj)
-                _structural = _incorrectly_constructed(slither)
+    with contract_id_resolution(_CAPTURE_LOCK) as _owners:
+        with type_id_resolution(_owners):
+            with _capture_ir_failures() as _ir_failures:
+                with _capture_parser_losses() as _parser_losses:
+                    with _capture_analysis_diagnostics() as (_diagnostics, _status):
+                        slither = Slither(crytic_compile_obj)
+                        _structural = _incorrectly_constructed(slither)
     analysis = _build_analysis_report(
         _diagnostics.records + _parser_losses,
         repo_root,
@@ -204,6 +208,7 @@ def _capture_ir_failures():
     from slither.core.declarations.function import Function as _SlitherFunction
 
     failures: list[str] = []
+    owner_thread = threading.get_ident()
 
     def _observed(self):  # type: ignore[no-untyped-def]
         try:
@@ -212,7 +217,8 @@ def _capture_ir_failures():
             name = getattr(self, "canonical_name", None) or getattr(
                 self, "name", "<function>"
             )
-            failures.append(f"{name}: {type(exc).__name__}: {exc}")
+            if threading.get_ident() == owner_thread:
+                failures.append(f"{name}: {type(exc).__name__}: {exc}")
             raise
 
     # type: ignore[method-assign] -- deliberate scoped patch, restored below.
