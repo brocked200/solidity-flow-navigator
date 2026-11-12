@@ -300,6 +300,78 @@ def test_relative_external_paths_are_content_addressed(tmp_path: Path) -> None:
     assert "../dependency" not in json.dumps(payload)
 
 
+@pytest.mark.parametrize("receiver_label", ["absolute", "symlink", "relative"])
+def test_receiver_files_are_portable_and_hashed(tmp_path: Path, receiver_label) -> None:
+    def export(checkout: Path):
+        facts, flows, scope, compilation = _analysis(checkout / "repo")
+        source = checkout / "dependency" / "D.sol"
+        source.parent.mkdir()
+        source.write_text("contract D {}")
+        receiver_file = str(source)
+        absolute = source
+        if receiver_label == "relative":
+            receiver_file = "../dependency/D.sol"
+        elif receiver_label == "symlink":
+            absolute = checkout / "repo" / "src" / "D.sol"
+            absolute.symlink_to(source)
+            receiver_file = str(absolute)
+        location = replace(
+            flows[0].root.source_location,
+            filename_absolute=str(absolute),
+            filename_relative=receiver_file,
+        )
+        receiver = replace(
+            facts.contracts[0], name="D", source_location=location, functions=()
+        )
+        facts = replace(facts, contracts=(*facts.contracts, receiver))
+        child = replace(
+            flows[0].root.children[0],
+            invoked_via_contract_name="D",
+            invoked_via_contract_file=receiver_file,
+            bound_via=None,
+        )
+        root = replace(
+            flows[0].root,
+            invoked_via_contract_file="src/A.sol",
+            children=(child,),
+        )
+        flow = replace(flows[0], root=root)
+        payload = build_machine_export(
+            facts, (flow,), scope, compilation, tool_version="test"
+        )
+        without_receiver = replace(
+            flow,
+            root=replace(
+                root, children=(replace(child, invoked_via_contract_file=None),)
+            ),
+        )
+        legacy = build_machine_export(
+            facts, (without_receiver,), scope, compilation, tool_version="test"
+        )
+        assert payload["payload_sha256"] != legacy["payload_sha256"]
+        exported_root = payload["flows"][0]["root"]
+        assert exported_root["invoked_via_contract_file"] == "src/A.sol"
+        assert exported_root["children"][0]["invoked_via_contract_file"].startswith(
+            "external/"
+        )
+        assert str(checkout) not in json.dumps(payload)
+        assert "../dependency" not in json.dumps(payload)
+        return payload
+
+    assert export(tmp_path / "a") == export(tmp_path / "b")
+
+
+@pytest.mark.parametrize("receiver_file", ["/unmapped/D.sol", "missing/D.sol"])
+def test_unmapped_receiver_file_fails_closed(tmp_path: Path, receiver_file) -> None:
+    facts, flows, scope, compilation = _analysis(tmp_path / "repo")
+    flow = replace(
+        flows[0],
+        root=replace(flows[0].root, invoked_via_contract_file=receiver_file),
+    )
+    with pytest.raises(ExportError, match="absent from the compiled manifest"):
+        build_machine_export(facts, (flow,), scope, compilation, tool_version="test")
+
+
 def test_export_rejects_changed_source_snapshot(tmp_path: Path) -> None:
     facts, flows, scope, compilation = _analysis(tmp_path / "repo")
     source = Path(facts.contracts[0].source_location.filename_absolute)

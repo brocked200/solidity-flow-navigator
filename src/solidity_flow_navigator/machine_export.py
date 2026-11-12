@@ -198,9 +198,9 @@ def _source_manifest(
             "bytes": len(raw),
             "newline": _newline_style(raw),
         }
-    # Stub paths originate from SourceLocation.filename_relative, which can
-    # traverse outside the checkout. Resolve those labels using the same
-    # compiled-source identity as locations, without retaining host paths.
+    # Stub and receiver paths originate from SourceLocation.filename_relative,
+    # which can traverse outside the checkout. Resolve those labels using the
+    # same compiled-source identity as locations, without retaining host paths.
     for loc in _fact_locations(facts):
         alias = aliases[str(Path(loc.filename_absolute).resolve())]
         previous = aliases.get(loc.filename_relative)
@@ -337,14 +337,15 @@ def _sanitize(value: Any, aliases: dict[str, str]) -> Any:
         if "filename_absolute" in out and "filename_relative" in out:
             absolute = str(Path(out.pop("filename_absolute")).resolve())
             out["filename_relative"] = _source_alias(absolute, aliases)
-        if isinstance(out.get("source_path"), str):
-            source_path = Path(out["source_path"])
-            label = (
-                str(source_path.resolve())
-                if source_path.is_absolute()
-                else str(source_path)
-            )
-            out["source_path"] = _source_alias(label, aliases)
+        for field in ("source_path", "invoked_via_contract_file"):
+            if isinstance(out.get(field), str):
+                source_path = Path(out[field])
+                label = (
+                    str(source_path.resolve())
+                    if source_path.is_absolute()
+                    else str(source_path)
+                )
+                out[field] = _source_alias(label, aliases)
         return out
     if isinstance(value, tuple | list):
         return [_sanitize(item, aliases) for item in value]

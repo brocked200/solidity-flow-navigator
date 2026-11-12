@@ -66,7 +66,25 @@ SolFlow's UI makes no network calls and never checks for updates. Detected build
 
 ### When the first run fails
 
-SolFlow is built on Slither: anything Slither cannot compile and analyze, SolFlow cannot visualize. When that happens, it prints the underlying error verbatim and exits, with no partial output and no auto-remediation. It never installs dependencies or modifies the target repository to force a build, because a half-compiled picture would silently mislead an audit. The rule of thumb: if the project does not build on its own in that directory, SolFlow will not build it either.
+SolFlow is built on Slither: anything Slither cannot compile, SolFlow cannot visualize. Compilation failures print the underlying error and exit without partial output or auto-remediation. It never installs dependencies or changes target source to force a build. The rule of thumb: if the project does not build on its own in that directory, SolFlow will not build it either.
+
+**Analyzer errors now stop a run by default.** A project can compile while
+Slither loses part of a function or source. SolFlow then exits `1` before
+exporting or starting the server. A run that previously produced evidence may
+therefore stop after this upgrade. Inspect the diagnostics before opting in
+with `--allow-partial-analysis`:
+
+```bash
+solflow --allow-partial-analysis --export-json artifacts/partial.json path/to/project
+```
+
+This opt-in allows a partial export or UI; it does not repair the analysis.
+The export records `analysis.complete=false`, known `degraded_functions`, and
+`diagnostics`. Treat degraded functions and reported losses as **UNREAD**.
+Parser losses may have diagnostics without a function name, so an empty
+`degraded_functions` list does not imply complete analysis. Compile errors
+remain fatal even with the flag. The same option and default are described
+by `solflow --help`.
 
 The two most common first-run failures are environment issues, not tool bugs:
 
@@ -101,7 +119,14 @@ the audited repository.
 
 ## Configuration
 
-SolFlow runs with sensible defaults. By default it excludes common test and mock directories (`**/*.t.sol`, `**/test/**`, `**/tests/**`, `**/mocks/**`) and `*Mock*` contracts. Refine scope through a config file, CLI flags, or both. CLI flags override file values; file values override defaults.
+SolFlow runs with sensible defaults. By default it excludes common test and mock directories (`**/*.t.sol`, `**/test/**`, `**/tests/**`, `**/mocks/**`) and `*Mock*` contracts. It also suppresses Flow roots under `**/node_modules/**` using `dependency_paths`. Refine scope through a config file, CLI flags, or both. File values replace defaults; repeatable CLI values append to the result.
+
+Dependency paths suppress roots only. They do not exclude sources from
+compilation or prevent a unique implementation from being an explicit
+`--bind` target. In contrast, `exclude_paths` also makes a matching contract
+ineligible as a binding target. `lib/**` is not a default dependency path:
+in-tree library Flows remain visible. Traversal stubs and library inlining
+are separate resolution settings.
 
 ### CLI flags
 
@@ -111,6 +136,8 @@ Run `solflow --help` for the full reference, grouped into **Scope**, **Resolutio
 |------|--------------|
 | `--exclude-path GLOB` | Drop contracts whose file path matches the glob (repeatable) |
 | `--exclude-contract PATTERN` | Drop contracts whose name matches the pattern (repeatable) |
+| `--dependency-path GLOB` | Suppress vendored Flow roots while retaining explicit binding eligibility (repeatable) |
+| `--allow-partial-analysis` | Opt in to a degraded export or UI; analyzer errors otherwise exit `1` |
 | `--inline-library NAME` | Recurse into a `lib/<NAME>/` dependency instead of stubbing it (repeatable) |
 | `--stub-path GLOB` | Stop at a terminal node for matching in-tree call targets, e.g. dense math libraries (repeatable) |
 | `--expand-all` | Open every Flow fully expanded, for a bird's-eye view |
@@ -127,9 +154,21 @@ SolFlow looks for `solflow.toml` in the directory you invoke it from. All keys a
 [scope]
 exclude_paths = ["**/*.t.sol", "**/test/**", "**/tests/**", "**/mocks/**"]
 exclude_contracts = ["*Mock*"]
+dependency_paths = ["**/node_modules/**"]
 inline_libraries = []
 stub_paths = []
 ```
+
+For example, `--dependency-path 'vendor/**'` appends another dependency tree.
+Set `dependency_paths = []` in the config to clear the default. Sources still
+compile; a dependency may appear as a callee even when it has no Flow root.
+
+The export's `analysis` and `scope.dependency_paths` fields are inside the
+hashed core. Their addition changed `payload_sha256` for every artifact,
+including runs with no analyzer errors. Receiver-file identities also affect
+the digest. Schema version remains `1`: these fields are additive; older
+consumers must tolerate new keys. See [Machine export](docs/MACHINE_EXPORT.md)
+for the fields and the limits of the analysis-completeness signal.
 
 ## How it works
 
