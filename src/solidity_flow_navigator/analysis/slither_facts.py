@@ -68,11 +68,12 @@ def extract_facts(
 
     repo_root = Path(repo_path).resolve()
     with _capture_ir_failures() as _ir_failures:
-        with _capture_analysis_diagnostics() as (_diagnostics, _status):
-            slither = Slither(crytic_compile_obj)
-            _structural = _incorrectly_constructed(slither)
+        with _capture_parser_losses() as _parser_losses:
+            with _capture_analysis_diagnostics() as (_diagnostics, _status):
+                slither = Slither(crytic_compile_obj)
+                _structural = _incorrectly_constructed(slither)
     analysis = _build_analysis_report(
-        _diagnostics.records,
+        _diagnostics.records + _parser_losses,
         repo_root,
         capture_unverified=tuple(_status.reasons),
         structurally_incomplete=_structural,
@@ -154,12 +155,10 @@ class _CaptureStatus:
     detectable once the block exits, after the caller has already received
     this object.
 
-    Residual limitation, stated rather than hidden: a host that disables
-    logging, lets Slither emit, and re-enables it entirely inside
-    ``Slither(cc)`` leaves no trace either snapshot can see. The structural
-    cross-check covers contract-level failures but NOT top-level function IR
-    failures, which log and continue without flagging a contract. Closing that
-    last gap needs construction isolated in a worker with controlled logging.
+    A host can disable and re-enable logging entirely inside ``Slither(cc)``
+    without leaving a trace in either snapshot. Direct IR and parser observers
+    cover their known loss paths independently; these snapshots still protect
+    the remaining ERROR diagnostics that are observed through logging.
     """
 
     __slots__ = ("reasons",)
@@ -235,6 +234,75 @@ def _capture_ir_failures():
 
 
 @contextmanager
+def _capture_parser_losses():
+    """Observe empty ASTs and unresolved exports without depending on logging.
+
+    Slither 0.11.6 returns on a falsy ``parse_top_level_items`` input. Its
+    ``_update_file_scopes`` first propagates accessible scopes, then resolves
+    each exported ID against the nine declaration maps below. Inspect that
+    same parser AFTER propagation: IDs are local to a compilation unit, so
+    pooling them across parsers could hide a missing reference.
+
+    These private interfaces are deliberately required, rather than skipped
+    with getattr defaults: upstream interface drift must raise, not silently
+    turn off observation. A new declaration map can cause a conservative
+    incomplete result until this list is updated. Both wrappers leave the
+    original parser behavior and logging intact.
+    """
+    import importlib
+
+    from slither.solc_parsing.slither_compilation_unit_solc import (
+        SlitherCompilationUnitSolc,
+    )
+
+    slither_module = importlib.import_module("slither.slither")
+    losses: list[str] = []
+    owner_thread = threading.get_ident()
+
+    def _observed_parse(self, data_loaded, filename):
+        if threading.get_ident() == owner_thread and not data_loaded:
+            losses.append(f"crytic-compile returned an empty AST for {filename}.")
+        return original_parse(self, data_loaded, filename)
+
+    def _observed_scopes(parser):
+        result = original_scopes(parser)
+        # Slither construction is synchronous. Unrelated direct Slither users
+        # in another thread must not contribute losses to this extraction.
+        if threading.get_ident() == owner_thread:
+            known_ids = set().union(
+                parser.contracts_by_id,
+                parser.functions_by_id,
+                parser.imports_by_id,
+                parser.top_level_variables_by_id,
+                parser.top_level_events_by_id,
+                parser.top_level_structures_by_id,
+                parser.top_level_type_aliases_by_id,
+                parser.top_level_enums_by_id,
+                parser.top_level_errors_by_id,
+            )
+            for scope in parser.compilation_unit.scopes.values():
+                for ref_id in sorted(scope.exported_symbols - known_ids):
+                    # Match upstream's wording so ordinary captured records
+                    # and direct observations de-duplicate in the report.
+                    losses.append(
+                        "Failed to resolved name for reference id "
+                        f"{ref_id} in {scope.filename.absolute}."
+                    )
+        return result
+
+    with _CAPTURE_LOCK:
+        original_parse = SlitherCompilationUnitSolc.parse_top_level_items
+        original_scopes = slither_module._update_file_scopes
+        try:
+            SlitherCompilationUnitSolc.parse_top_level_items = _observed_parse
+            slither_module._update_file_scopes = _observed_scopes
+            yield losses
+        finally:
+            SlitherCompilationUnitSolc.parse_top_level_items = original_parse
+            slither_module._update_file_scopes = original_scopes
+
+
+@contextmanager
 def _capture_analysis_diagnostics():
     """Capture Slither's ERROR output without mutating global logging state.
 
@@ -277,9 +345,7 @@ def _capture_analysis_diagnostics():
             # Re-check: suppression turned on during construction hides records
             # while the opening snapshot still says capture was possible.
             if logging.root.manager.disable >= logging.ERROR:
-                unverified.append(
-                    "logging.disable() suppressed ERROR during analysis"
-                )
+                unverified.append("logging.disable() suppressed ERROR during analysis")
             for logger, level, disabled, propagate in saved:
                 logger.removeHandler(collector)
                 logger.setLevel(level)
@@ -369,7 +435,6 @@ def _incorrectly_constructed(slither: Slither) -> tuple[str, ...]:
         if getattr(contract, "is_incorrectly_constructed", False):
             out.append(f"{getattr(contract, 'name', '<contract>')} <incomplete>")
     return tuple(out)
-
 
 
 # ---------------------------------------------------------------------------
