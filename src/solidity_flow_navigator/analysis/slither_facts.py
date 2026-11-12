@@ -142,7 +142,9 @@ _SLITHER_LOGGERS: tuple[str, ...] = (
 
 # Serialises extractions in one process so two analyses cannot collect each
 # other's records or race on the logger levels they restore.
-_CAPTURE_LOCK = threading.Lock()
+# Reentrant: a same-thread nested extract_facts would otherwise deadlock on
+# itself after having already installed a wrapper.
+_CAPTURE_LOCK = threading.RLock()
 
 
 class _CaptureStatus:
@@ -202,12 +204,11 @@ def _capture_ir_failures():
 
     from slither.core.declarations.function import Function as _SlitherFunction
 
-    original = _SlitherFunction.generate_slithir_and_analyze
     failures: list[str] = []
 
     def _observed(self):  # type: ignore[no-untyped-def]
         try:
-            return original(self)
+            return original_inner(self)
         except Exception as exc:  # re-raised: Slither's own handler still runs
             name = getattr(self, "canonical_name", None) or getattr(
                 self, "name", "<function>"
@@ -216,11 +217,21 @@ def _capture_ir_failures():
             raise
 
     # type: ignore[method-assign] -- deliberate scoped patch, restored below.
-    _SlitherFunction.generate_slithir_and_analyze = _observed  # type: ignore
-    try:
-        yield failures
-    finally:
-        _SlitherFunction.generate_slithir_and_analyze = original  # type: ignore
+    with _CAPTURE_LOCK:
+        # Inside the lock, or two concurrent analyses interleave their patches:
+        # A installs WA, B saves WA and installs WB, A's calls run WB->WA and
+        # contaminate B's list, A restores the original, B then constructs with
+        # no wrapper at all and finally restores A's obsolete WA into the
+        # process. Reading and installing must be atomic against the other
+        # capture mechanism too, which is why both take this same lock.
+        original_inner = _SlitherFunction.generate_slithir_and_analyze
+        _SlitherFunction.generate_slithir_and_analyze = _observed  # type: ignore
+        try:
+            yield failures
+        finally:
+            _SlitherFunction.generate_slithir_and_analyze = (  # type: ignore
+                original_inner
+            )
 
 
 @contextmanager
