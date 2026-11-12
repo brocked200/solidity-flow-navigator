@@ -69,6 +69,27 @@ remain separate limitations. An empty function list is insufficient: an empty
 AST or unresolved parser reference can lose information without identifying a
 function. Inspect both `complete` and `diagnostics`.
 
+SolFlow applies scoped declaration-ID compatibility handling during Slither
+construction. Contract identifiers, including namespace members and Contract
+types, resolve through the owning compilation unit's complete declaration
+table. Enum, struct and value-type declarations retain their exact compiler
+identity; nested declarations are associated with models by owner and source
+span. Function IDs keep the contextual and virtual-dispatch rules. The
+compatibility hooks are restored after extraction and do not modify installed
+Slither files or Solidity sources. Missing or contradictory identity evidence
+fails closed instead of selecting an unrelated same-name declaration.
+
+This integration is checked against Slither 0.11.6. Upstream private-interface
+changes can require a compatibility update; an unsupported identity must not
+be treated as a successful repair. Legacy or synthesized inputs without an
+authoritative declaration ID retain Slither's original behavior.
+
+Corrected resolution can restore previously missing calls and replace a
+wrong but callable dependency target even when no IR error was logged. It can
+therefore change edges, source-bearing Flow trees and `payload_sha256` without
+any change to Solidity input. Record the SolFlow Git revision alongside audit
+artifacts when comparing analyzer revisions.
+
 For Slither 0.11.6, IR-generation aborts, empty-AST handling and unresolved
 exported references have direct observation hooks scoped to extraction. Those
 paths remain visible when logging is disabled entirely within construction.
