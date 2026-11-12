@@ -139,9 +139,7 @@ def load_partial_scope_from_toml(path: Path) -> PartialScope:
 
     return PartialScope(
         exclude_paths=_extract_string_list(scope_table, "exclude_paths", path),
-        dependency_paths=_extract_string_list(
-            scope_table, "dependency_paths", path
-        ),
+        dependency_paths=_extract_string_list(scope_table, "dependency_paths", path),
         exclude_contracts=_extract_string_list(scope_table, "exclude_contracts", path),
         inline_libraries=_extract_string_list(scope_table, "inline_libraries", path),
         stub_paths=_extract_string_list(scope_table, "stub_paths", path),
