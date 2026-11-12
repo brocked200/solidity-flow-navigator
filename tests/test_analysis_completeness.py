@@ -200,3 +200,60 @@ def test_duplicate_identity_error_names_the_offenders(monkeypatch, tmp_path, cap
     assert "node_modules/a/Math.sol" in err, "name the file it came from"
     assert "node_modules/b/Math.sol" in err
     assert "--exclude-path" in err, "tell the user which flag fixes it"
+
+def _real_function_node(canonical: str, filename: str):
+    """A genuine FunctionNode, not a stand-in.
+
+    The monkeypatched test above proves the KEY changed; this one proves the
+    production type actually carries the attribute the key now reads, and that
+    the dedup the key exists to perform still works.
+    """
+    from solidity_flow_navigator.flow.types import FunctionNode
+    from solidity_flow_navigator.analysis.types import SourceLocation
+
+    return FunctionNode(
+        canonical_name=canonical,
+        name="max",
+        full_name="max(uint256,uint256)",
+        declarer_contract_name="Math",
+        invoked_via_contract_name="Math",
+        invoked_via_super=False,
+        is_modifier=False,
+        visibility="internal",
+        payable=False,
+        view=True,
+        pure=True,
+        source_code="function max(uint256 a, uint256 b) {}",
+        source_location=SourceLocation(
+            filename_absolute="/" + filename,
+            filename_relative=filename,
+            start=0,
+            length=1,
+            lines=(1,),
+            starting_column=1,
+            ending_column=2,
+        ),
+        builtins_used=(),
+        children=(),
+    )
+
+
+def test_real_function_node_carries_the_file_the_identity_reads() -> None:
+    node = _real_function_node("Math.max(uint256,uint256)", "a/Math.sol")
+    assert node.source_location.filename_relative == "a/Math.sol"
+    assert _child_identity(node) == ("fn", "a/Math.sol", "Math.max(uint256,uint256)")
+
+
+def test_real_nodes_same_name_different_file_stay_distinct() -> None:
+    a = _real_function_node("Math.max(uint256,uint256)", "oz/contracts/Math.sol")
+    b = _real_function_node("Math.max(uint256,uint256)", "oz/contracts-v4/Math.sol")
+    assert _child_identity(a) != _child_identity(b)
+
+
+def test_identical_nodes_still_collapse() -> None:
+    """The key's purpose is collapsing CFG-branch duplicates Slither forks on
+    ternaries and short-circuit booleans. Both forks resolve to the same
+    function in the same file, so adding the file must NOT stop them merging."""
+    a = _real_function_node("Math.max(uint256,uint256)", "oz/contracts/Math.sol")
+    b = _real_function_node("Math.max(uint256,uint256)", "oz/contracts/Math.sol")
+    assert _child_identity(a) == _child_identity(b)
