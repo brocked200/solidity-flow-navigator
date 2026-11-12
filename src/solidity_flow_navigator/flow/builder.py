@@ -1456,7 +1456,18 @@ def _child_identity(node: FlowNode) -> tuple:
         # @openzeppelin/contracts-v4 -- produce the same identity, and when both
         # resolve at one call statement the dedup discards an entire distinct
         # callee subtree with no diagnostic.
-        return ("fn", node.source_location.filename_relative, node.canonical_name)
+        return (
+            "fn",
+            node.source_location.filename_relative,
+            node.canonical_name,
+            # The receiver too. x.f() + y.f() with x:D1 and y:D2, both
+            # inheriting Base.f, resolve to one declaration in one file at one
+            # statement -- identical on every other component -- yet their
+            # subtrees differ because virtual dispatch below them resolves
+            # against different receivers. Without this the second subtree is
+            # silently discarded.
+            node.invoked_via_contract_name,
+        )
     if isinstance(node, ExternalNode):
         # Same reasoning as FunctionNode: two vendored majors of one package
         # expose the same canonical name, and without the dependency file

@@ -69,11 +69,11 @@ def test_collector_takes_slither_loggers_and_ignores_everything_else() -> None:
     """Collecting from the root logger made any unrelated library ERROR -- a
     background HTTP failure, another thread -- mark a valid analysis
     incomplete. Only Slither's own emitters count."""
-    with _capture_analysis_diagnostics() as (collector, possible):
+    with _capture_analysis_diagnostics() as (collector, status):
         logging.getLogger("ContractSolcParsing").error(REAL_IR_ERROR)
         logging.getLogger("requests.adapters").error("connection reset")
         logging.getLogger("ContractSolcParsing").warning("not an error")
-    assert possible is True
+    assert status.verified is True
     assert collector.records == [REAL_IR_ERROR]
 
 
@@ -100,7 +100,7 @@ def test_capture_sees_errors_a_raised_logger_level_would_have_hidden() -> None:
     original = target.level
     target.setLevel(logging.CRITICAL)
     try:
-        with _capture_analysis_diagnostics() as (collector, _):
+        with _capture_analysis_diagnostics() as (collector, _status):
             target.error(REAL_IR_ERROR)
         assert collector.records == [REAL_IR_ERROR]
     finally:
@@ -112,12 +112,14 @@ def test_completeness_fails_closed_when_capture_is_impossible() -> None:
     gate that certifies completeness it never observed is worse than no gate."""
     logging.disable(logging.CRITICAL)
     try:
-        with _capture_analysis_diagnostics() as (_collector, possible):
+        with _capture_analysis_diagnostics() as (_collector, status):
             pass
-        assert possible is False
-        report = _build_analysis_report([], Path("/repo"), capture_possible=False)
+        assert status.verified is False
+        report = _build_analysis_report(
+            [], Path("/repo"), capture_unverified=tuple(status.reasons)
+        )
         assert report.complete is False
-        assert any("could not be captured" in d for d in report.diagnostics)
+        assert any("completeness unverified" in d for d in report.diagnostics)
     finally:
         logging.disable(logging.NOTSET)
 
@@ -214,9 +216,10 @@ def test_allow_partial_analysis_opts_back_in(monkeypatch, tmp_path, capsys):
 # --------------------------------------------------------------------------
 
 
-def _function_node(canonical: str, filename: str):
+def _function_node(canonical: str, filename: str, receiver: str = "Math"):
     return SimpleNamespace(
         canonical_name=canonical,
+        invoked_via_contract_name=receiver,
         source_location=SimpleNamespace(filename_relative=filename),
     )
 
@@ -331,7 +334,12 @@ def _real_function_node(canonical: str, filename: str):
 def test_real_function_node_carries_the_file_the_identity_reads() -> None:
     node = _real_function_node("Math.max(uint256,uint256)", "a/Math.sol")
     assert node.source_location.filename_relative == "a/Math.sol"
-    assert _child_identity(node) == ("fn", "a/Math.sol", "Math.max(uint256,uint256)")
+    assert _child_identity(node) == (
+        "fn",
+        "a/Math.sol",
+        "Math.max(uint256,uint256)",
+        "Math",
+    )
 
 
 def test_real_nodes_same_name_different_file_stay_distinct() -> None:
@@ -407,3 +415,70 @@ def test_analysis_report_reaches_the_hashed_export_core(tmp_path) -> None:
     assert clean["payload_sha256"] != degraded["payload_sha256"], (
         "the completeness of the analysis must be inside the hashed core"
     )
+
+
+def test_a_host_filter_makes_capture_unverified() -> None:
+    """Logger filters run BEFORE handlers, so a host filter can drop a record
+    this collector would otherwise see. We cannot know what it dropped."""
+    target = logging.getLogger("SlitherSolcParsing")
+    drop_everything = logging.Filter()
+    drop_everything.filter = lambda record: False  # type: ignore[assignment]
+    target.addFilter(drop_everything)
+    try:
+        with _capture_analysis_diagnostics() as (_collector, status):
+            pass
+        assert status.verified is False
+        assert any("log filter" in r for r in status.reasons)
+        report = _build_analysis_report(
+            [], Path("/repo"), capture_unverified=tuple(status.reasons)
+        )
+        assert report.complete is False
+    finally:
+        target.removeFilter(drop_everything)
+
+
+def test_suppression_starting_during_analysis_is_detected() -> None:
+    """The opening snapshot cannot see suppression that begins after it. The
+    exit re-check can, and the status object is mutable so the caller sees it."""
+    with _capture_analysis_diagnostics() as (_collector, status):
+        assert status.verified is True
+        logging.disable(logging.CRITICAL)
+    try:
+        assert status.verified is False
+        assert any("during analysis" in r for r in status.reasons)
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_same_declaration_via_different_receivers_stays_distinct() -> None:
+    """x.f() + y.f() with x:D1 and y:D2, both inheriting Base.f. One
+    declaration, one file, one statement -- but the subtrees below them differ
+    because dispatch resolves against different receivers."""
+    a = _real_function_node("Base.f()", "src/Base.sol")
+    b = _real_function_node("Base.f()", "src/Base.sol")
+    import dataclasses
+
+    a = dataclasses.replace(a, invoked_via_contract_name="D1")
+    b = dataclasses.replace(b, invoked_via_contract_name="D2")
+    assert _child_identity(a) != _child_identity(b)
+    assert _child_identity(a) == _child_identity(
+        dataclasses.replace(a, invoked_via_contract_name="D1")
+    ), "the same receiver must still collapse"
+
+
+def test_dependency_paths_can_be_cleared_and_extended_from_config() -> None:
+    """A built-in default nobody can turn off is a defect in itself."""
+    from solidity_flow_navigator.flow.config import PartialScope, apply_partial
+
+    cleared = apply_partial(DEFAULT_SCOPE, PartialScope(dependency_paths=()))
+    assert cleared.dependency_paths == ()
+    assert dependency_path(cleared, "node_modules/x/A.sol") is False
+
+    replaced = apply_partial(
+        DEFAULT_SCOPE, PartialScope(dependency_paths=("vendor/**",))
+    )
+    assert replaced.dependency_paths == ("vendor/**",)
+    assert dependency_path(replaced, "vendor/A.sol") is True
+
+    untouched = apply_partial(DEFAULT_SCOPE, PartialScope())
+    assert untouched.dependency_paths == DEFAULT_SCOPE.dependency_paths

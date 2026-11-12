@@ -38,6 +38,7 @@ _KNOWN_SCOPE_KEYS: frozenset[str] = frozenset(
         "exclude_contracts",
         "inline_libraries",
         "stub_paths",
+        "dependency_paths",
     }
 )
 
@@ -75,6 +76,11 @@ class PartialScope:
     exclude_contracts: tuple[str, ...] | None = None
     inline_libraries: tuple[str, ...] | None = None
     stub_paths: tuple[str, ...] | None = None
+    # Vendored dependency trees whose contracts produce no Flow ROOTS. Follows
+    # the same tri-state rule as the keys above, so ``dependency_paths = []``
+    # clears the built-in default -- otherwise the default would be one nobody
+    # could turn off.
+    dependency_paths: tuple[str, ...] | None = None
     # v0.17.0 (§13.2): the [bindings] table — interface→contract pairs. None
     # when the table is absent, () when present-but-empty, populated otherwise.
     # Sourced from a top-level [bindings] table, not a [scope] key.
@@ -133,6 +139,9 @@ def load_partial_scope_from_toml(path: Path) -> PartialScope:
 
     return PartialScope(
         exclude_paths=_extract_string_list(scope_table, "exclude_paths", path),
+        dependency_paths=_extract_string_list(
+            scope_table, "dependency_paths", path
+        ),
         exclude_contracts=_extract_string_list(scope_table, "exclude_contracts", path),
         inline_libraries=_extract_string_list(scope_table, "inline_libraries", path),
         stub_paths=_extract_string_list(scope_table, "stub_paths", path),
@@ -156,6 +165,11 @@ def apply_partial(base: Scope, partial: PartialScope) -> Scope:
             base.exclude_paths
             if partial.exclude_paths is None
             else partial.exclude_paths
+        ),
+        dependency_paths=(
+            base.dependency_paths
+            if partial.dependency_paths is None
+            else partial.dependency_paths
         ),
         exclude_contracts=(
             base.exclude_contracts

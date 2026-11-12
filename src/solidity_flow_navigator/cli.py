@@ -176,6 +176,18 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     scope_group.add_argument(
+        "--dependency-path",
+        action="append",
+        default=None,
+        metavar="GLOB",
+        help=(
+            "Gitignore-style glob for vendored dependency trees whose "
+            "contracts should produce no Flow roots. Unlike --exclude-path "
+            "this leaves them eligible as explicit --bind targets. Repeatable; "
+            "appends to the default and any config-file value."
+        ),
+    )
+    scope_group.add_argument(
         "--allow-partial-analysis",
         action="store_true",
         help=(
@@ -476,7 +488,10 @@ def _resolve_scope(args: argparse.Namespace, cwd: Path) -> Scope:
         # Not user-configurable via a CLI flag: this is the built-in vendored
         # dependency set, carried through so a resolved Scope still suppresses
         # dependency Flow roots.
-        dependency_paths=base.dependency_paths,
+        # getattr: synthetic argparse namespaces in the CLI tests predate this
+        # flag, the same tolerance the completeness gate uses.
+        dependency_paths=base.dependency_paths
+        + tuple(getattr(args, "dependency_path", None) or ()),
     )
 
 

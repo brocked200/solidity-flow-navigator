@@ -67,13 +67,13 @@ def extract_facts(
     """
 
     repo_root = Path(repo_path).resolve()
-    with _capture_analysis_diagnostics() as (_diagnostics, _capture_possible):
+    with _capture_analysis_diagnostics() as (_diagnostics, _status):
         slither = Slither(crytic_compile_obj)
         _structural = _incorrectly_constructed(slither)
     analysis = _build_analysis_report(
         _diagnostics.records,
         repo_root,
-        capture_possible=_capture_possible,
+        capture_unverified=tuple(_status.reasons),
         structurally_incomplete=_structural,
     )
     # This cache belongs to one analysis, rather than a process-global path.
@@ -139,6 +139,31 @@ _SLITHER_LOGGERS: tuple[str, ...] = (
 _CAPTURE_LOCK = threading.Lock()
 
 
+class _CaptureStatus:
+    """Whether log capture can be trusted to have seen everything.
+
+    Mutable on purpose: suppression that begins during construction is only
+    detectable once the block exits, after the caller has already received
+    this object.
+
+    Residual limitation, stated rather than hidden: a host that disables
+    logging, lets Slither emit, and re-enables it entirely inside
+    ``Slither(cc)`` leaves no trace either snapshot can see. The structural
+    cross-check covers contract-level failures but NOT top-level function IR
+    failures, which log and continue without flagging a contract. Closing that
+    last gap needs construction isolated in a worker with controlled logging.
+    """
+
+    __slots__ = ("reasons",)
+
+    def __init__(self, reasons: list[str]) -> None:
+        self.reasons = reasons
+
+    @property
+    def verified(self) -> bool:
+        return not self.reasons
+
+
 class _DiagnosticCollector(logging.Handler):
     """Collects ERROR-level records emitted by Slither during construction."""
 
@@ -170,18 +195,35 @@ def _capture_analysis_diagnostics():
 
     collector = _DiagnosticCollector()
     saved: list[tuple[logging.Logger, int, bool, bool]] = []
-    capture_possible = logging.root.manager.disable < logging.ERROR
+    unverified: list[str] = []
     with _CAPTURE_LOCK:
+        # Snapshot INSIDE the lock: computing it before acquiring exposed the
+        # whole lock-wait interval, during which the host could change it.
+        if logging.root.manager.disable >= logging.ERROR:
+            unverified.append(
+                "logging.disable() suppressed ERROR when analysis started"
+            )
         for name in _SLITHER_LOGGERS:
             logger = logging.getLogger(name)
+            # A host filter runs BEFORE handlers, so it can drop a record this
+            # collector would otherwise see. We cannot know what it drops,
+            # so capture through this logger is unverified.
+            if logger.filters:
+                unverified.append(f"{name} carries a host log filter")
             saved.append((logger, logger.level, logger.disabled, logger.propagate))
             if logger.level > logging.ERROR or logger.level == logging.NOTSET:
                 logger.setLevel(logging.ERROR)
             logger.disabled = False
             logger.addHandler(collector)
         try:
-            yield collector, capture_possible
+            yield collector, _CaptureStatus(unverified)
         finally:
+            # Re-check: suppression turned on during construction hides records
+            # while the opening snapshot still says capture was possible.
+            if logging.root.manager.disable >= logging.ERROR:
+                unverified.append(
+                    "logging.disable() suppressed ERROR during analysis"
+                )
             for logger, level, disabled, propagate in saved:
                 logger.removeHandler(collector)
                 logger.setLevel(level)
@@ -210,7 +252,7 @@ def _build_analysis_report(
     messages: list[str],
     repo_root: Path | None = None,
     *,
-    capture_possible: bool = True,
+    capture_unverified: tuple[str, ...] = (),
     structurally_incomplete: tuple[str, ...] = (),
 ) -> AnalysisReport:
     root = repo_root if repo_root is not None else Path("/")
@@ -223,13 +265,11 @@ def _build_analysis_report(
     for name in structurally_incomplete:
         if name not in degraded:
             degraded.append(name)
-    if not capture_possible:
-        portable.insert(
-            0,
-            "analyzer diagnostics could not be captured "
-            "(logging.disable suppresses ERROR); completeness is unverified",
-        )
-    complete = capture_possible and not portable and not structurally_incomplete
+    for reason in capture_unverified:
+        portable.insert(0, f"completeness unverified: {reason}")
+    complete = (
+        not capture_unverified and not portable and not structurally_incomplete
+    )
     return AnalysisReport(
         complete=complete,
         degraded_functions=tuple(degraded),
