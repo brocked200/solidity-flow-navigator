@@ -9,6 +9,7 @@ partial one is worse than no output, because a human then skips the code.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +21,11 @@ from solidity_flow_navigator.analysis.slither_facts import (
 )
 from solidity_flow_navigator.analysis.types import AnalysisReport, RepoFacts
 from solidity_flow_navigator.flow.builder import _child_identity
-from solidity_flow_navigator.flow.scope import DEFAULT_SCOPE
+from solidity_flow_navigator.flow.scope import (
+    DEFAULT_SCOPE,
+    dependency_path,
+    path_excluded,
+)
 
 # The exact message Slither 0.11.6 emits, measured against AladdinDAO
 # fx-protocol-contracts. Slither logs this and CONTINUES: the function survives
@@ -39,33 +44,109 @@ REAL_IR_ERROR = (
 
 
 def test_ir_failure_is_parsed_into_a_degraded_function() -> None:
-    report = _build_analysis_report([REAL_IR_ERROR])
+    report = _build_analysis_report([REAL_IR_ERROR], Path("/repo"))
     assert report.complete is False
     assert report.degraded_functions == ("FxUSDBasePool.arbitrage",)
     assert report.diagnostics == (REAL_IR_ERROR,)
 
 
 def test_report_is_complete_when_nothing_was_logged() -> None:
-    report = _build_analysis_report([])
+    report = _build_analysis_report([], Path("/repo"))
     assert report.complete is True
     assert report.degraded_functions == ()
 
 
 def test_repeated_diagnostics_collapse_but_order_is_kept() -> None:
     other = "Impossible to generate IR for A.b(): boom"
-    report = _build_analysis_report([REAL_IR_ERROR, other, REAL_IR_ERROR])
+    report = _build_analysis_report(
+        [REAL_IR_ERROR, other, REAL_IR_ERROR], Path("/repo")
+    )
     assert report.degraded_functions == ("FxUSDBasePool.arbitrage", "A.b()")
     assert len(report.diagnostics) == 2
 
 
-def test_collector_captures_errors_from_any_logger_and_detaches() -> None:
-    root = logging.getLogger()
-    before = list(root.handlers)
-    with _capture_analysis_diagnostics() as collector:
+def test_collector_takes_slither_loggers_and_ignores_everything_else() -> None:
+    """Collecting from the root logger made any unrelated library ERROR -- a
+    background HTTP failure, another thread -- mark a valid analysis
+    incomplete. Only Slither's own emitters count."""
+    with _capture_analysis_diagnostics() as (collector, possible):
         logging.getLogger("ContractSolcParsing").error(REAL_IR_ERROR)
-        logging.getLogger("something.else").warning("not an error")
+        logging.getLogger("requests.adapters").error("connection reset")
+        logging.getLogger("ContractSolcParsing").warning("not an error")
+    assert possible is True
     assert collector.records == [REAL_IR_ERROR]
-    assert list(root.handlers) == before, "handler must not leak past the block"
+
+
+def test_capture_leaves_global_logging_state_exactly_as_found() -> None:
+    root = logging.getLogger()
+    root_before = (root.level, list(root.handlers))
+    target = logging.getLogger("ContractSolcParsing")
+    target.setLevel(logging.CRITICAL)
+    target.propagate = False
+    before = (target.level, target.disabled, target.propagate, list(target.handlers))
+    with _capture_analysis_diagnostics():
+        pass
+    after = (target.level, target.disabled, target.propagate,
+             list(target.handlers))
+    assert after == before
+    assert (root.level, list(root.handlers)) == root_before, (
+        "the root logger must not be touched: raising its level changes what "
+        "the host application logs"
+    )
+
+
+def test_capture_sees_errors_a_raised_logger_level_would_have_hidden() -> None:
+    target = logging.getLogger("ContractSolcParsing")
+    original = target.level
+    target.setLevel(logging.CRITICAL)
+    try:
+        with _capture_analysis_diagnostics() as (collector, _):
+            target.error(REAL_IR_ERROR)
+        assert collector.records == [REAL_IR_ERROR]
+    finally:
+        target.setLevel(original)
+
+
+def test_completeness_fails_closed_when_capture_is_impossible() -> None:
+    """logging.disable() suppresses records before any handler sees them. A
+    gate that certifies completeness it never observed is worse than no gate."""
+    logging.disable(logging.CRITICAL)
+    try:
+        with _capture_analysis_diagnostics() as (_collector, possible):
+            pass
+        assert possible is False
+        report = _build_analysis_report([], Path("/repo"), capture_possible=False)
+        assert report.complete is False
+        assert any("could not be captured" in d for d in report.diagnostics)
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_top_level_function_is_not_reported_as_a_function_named_top() -> None:
+    msg = "Impossible to generate IR for top level function doThing(uint256): boom"
+    report = _build_analysis_report([msg], Path("/repo"))
+    assert report.degraded_functions == ("doThing(uint256)",)
+
+
+def test_diagnostics_are_portable_across_checkouts() -> None:
+    """The report is inside the hashed export core, so a host-dependent
+    absolute path would make two clones of one repo hash differently."""
+    a = _build_analysis_report(
+        ["cannot resolve /home/alice/work/repo/contracts/A.sol"],
+        Path("/home/alice/work/repo"),
+    )
+    b = _build_analysis_report(
+        ["cannot resolve /srv/ci/repo/contracts/A.sol"], Path("/srv/ci/repo")
+    )
+    assert a.diagnostics == b.diagnostics == ("cannot resolve contracts/A.sol",)
+
+
+def test_structurally_incomplete_contracts_fail_closed_without_logs() -> None:
+    report = _build_analysis_report(
+        [], Path("/repo"), structurally_incomplete=("Broken <incomplete>",)
+    )
+    assert report.complete is False
+    assert "Broken <incomplete>" in report.degraded_functions
 
 
 def test_repo_facts_defaults_to_complete_for_synthetic_facts() -> None:
@@ -149,7 +230,8 @@ def test_same_name_in_two_vendored_trees_are_distinct_identities(monkeypatch):
     from solidity_flow_navigator.flow import builder as builder_mod
 
     a = _function_node(
-        "Math.max(uint256,uint256)", "node_modules/@openzeppelin/contracts/utils/math/Math.sol"
+        "Math.max(uint256,uint256)",
+        "node_modules/@openzeppelin/contracts/utils/math/Math.sol",
     )
     b = _function_node(
         "Math.max(uint256,uint256)",
@@ -164,11 +246,19 @@ def test_same_name_in_two_vendored_trees_are_distinct_identities(monkeypatch):
 # --------------------------------------------------------------------------
 
 
-def test_node_modules_is_excluded_from_flow_generation_by_default() -> None:
-    assert "**/node_modules/**" in DEFAULT_SCOPE.exclude_paths
-    # lib/** is deliberately NOT defaulted: inline_libraries addresses
-    # lib/{name}/** and excluding it loses in-tree library Flows.
-    assert "**/lib/**" not in DEFAULT_SCOPE.exclude_paths
+def test_vendored_deps_suppress_flow_roots_without_blocking_bindings() -> None:
+    """``exclude_paths`` also gates ``--bind`` eligibility, so putting the
+    dependency default there made a unique implementation under node_modules
+    unbindable and aborted the CLI. The two concepts are separate fields."""
+    vendored = "node_modules/@openzeppelin/contracts/utils/math/Math.sol"
+    assert dependency_path(DEFAULT_SCOPE, vendored) is True
+    assert path_excluded(DEFAULT_SCOPE, vendored) is False, (
+        "a vendored contract must stay eligible as an explicit --bind target"
+    )
+    assert "**/node_modules/**" not in DEFAULT_SCOPE.exclude_paths
+    # lib/** is deliberately not a dependency default: inline_libraries
+    # addresses lib/{name}/** and excluding it loses in-tree library Flows.
+    assert dependency_path(DEFAULT_SCOPE, "lib/forge-std/src/Test.sol") is False
 
 
 def test_duplicate_identity_error_names_the_offenders(monkeypatch, tmp_path, capsys):
@@ -257,3 +347,63 @@ def test_identical_nodes_still_collapse() -> None:
     a = _real_function_node("Math.max(uint256,uint256)", "oz/contracts/Math.sol")
     b = _real_function_node("Math.max(uint256,uint256)", "oz/contracts/Math.sol")
     assert _child_identity(a) == _child_identity(b)
+
+
+def test_external_nodes_from_different_dependency_files_stay_distinct() -> None:
+    """The motivating case: MathV4.max(a,b) + MathV5.max(a,b) on one statement.
+    node_modules targets are stubbed as ExternalNode, so fixing only
+    FunctionNode left the original defect in place."""
+    from solidity_flow_navigator.flow.types import ExternalNode
+    from solidity_flow_navigator.analysis.types import SourceLocation
+
+    def _ext(path: str):
+        return ExternalNode(
+            target_canonical_name="Math.max(uint256,uint256)",
+            target_function_name="max",
+            target_contract_name="Math",
+            source_path=path,
+            call_site=SourceLocation(
+                filename_absolute="/a.sol", filename_relative="a.sol",
+                start=0, length=1, lines=(1,), starting_column=1, ending_column=2,
+            ),
+        )
+
+    a = _ext("node_modules/@openzeppelin/contracts/utils/math/Math.sol")
+    b = _ext("node_modules/@openzeppelin/contracts-v4/utils/math/Math.sol")
+    assert _child_identity(a) != _child_identity(b)
+    assert _child_identity(a) == _child_identity(
+        _ext("node_modules/@openzeppelin/contracts/utils/math/Math.sol")
+    ), "identical dependency targets must still collapse"
+
+
+def test_analysis_report_reaches_the_hashed_export_core(tmp_path) -> None:
+    """A partial analysis must not hash the same as a complete one over the
+    same sources, or a consumer pinning the digest cannot tell them apart."""
+    import dataclasses
+
+    from solidity_flow_navigator.machine_export import build_machine_export
+    from tests.test_machine_export import _analysis as _export_fixture
+
+    facts, flows, scope, compilation = _export_fixture(tmp_path / "repo")
+
+    clean = build_machine_export(
+        facts, flows, scope, compilation, tool_version="test"
+    )
+    degraded_facts = dataclasses.replace(
+        facts,
+        analysis=AnalysisReport(
+            complete=False,
+            degraded_functions=("A.f()",),
+            diagnostics=("Impossible to generate IR for A.f(): boom",),
+        ),
+    )
+    degraded = build_machine_export(
+        degraded_facts, flows, scope, compilation, tool_version="test"
+    )
+
+    assert clean["analysis"]["complete"] is True
+    assert degraded["analysis"]["complete"] is False
+    assert degraded["analysis"]["degraded_functions"] == ["A.f()"]
+    assert clean["payload_sha256"] != degraded["payload_sha256"], (
+        "the completeness of the analysis must be inside the hashed core"
+    )

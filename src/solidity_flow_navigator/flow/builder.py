@@ -29,6 +29,7 @@ from .scope import (
     binding_for,
     contract_excluded,
     library_inlined,
+    dependency_path,
     path_excluded,
     target_stubbed,
 )
@@ -103,7 +104,8 @@ def build_flows(facts: RepoFacts, scope: Scope) -> tuple[Flow, ...]:
     for contract in facts.contracts:
         if contract.kind != "contract":
             continue  # interfaces and libraries don't produce entry points (§11.4)
-        if path_excluded(scope, contract.source_location.filename_relative):
+        _rel = contract.source_location.filename_relative
+        if path_excluded(scope, _rel) or dependency_path(scope, _rel):
             continue
         if contract_excluded(scope, contract.name):
             continue
@@ -1456,7 +1458,11 @@ def _child_identity(node: FlowNode) -> tuple:
         # callee subtree with no diagnostic.
         return ("fn", node.source_location.filename_relative, node.canonical_name)
     if isinstance(node, ExternalNode):
-        return ("ext", node.target_canonical_name)
+        # Same reasoning as FunctionNode: two vendored majors of one package
+        # expose the same canonical name, and without the dependency file
+        # ``MathV4.max(a,b) + MathV5.max(a,b)`` on one statement merges into a
+        # single child, hiding one of the two call targets entirely.
+        return ("ext", node.source_path, node.target_canonical_name)
     if isinstance(node, SinkNode):
         return ("sink", node.kind, node.descriptor, node.value_expression)
     return ("unr", node.raw_kind, node.raw_subkind, node.descriptor)

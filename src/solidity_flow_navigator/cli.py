@@ -473,6 +473,10 @@ def _resolve_scope(args: argparse.Namespace, cwd: Path) -> Scope:
         inline_libraries=base.inline_libraries + tuple(args.inline_library or ()),
         stub_paths=base.stub_paths + tuple(args.stub_path or ()),
         interface_bindings=base.interface_bindings + tuple(args.bind or ()),
+        # Not user-configurable via a CLI flag: this is the built-in vendored
+        # dependency set, carried through so a resolved Scope still suppresses
+        # dependency Flow roots.
+        dependency_paths=base.dependency_paths,
     )
 
 

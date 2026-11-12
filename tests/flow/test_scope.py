@@ -81,11 +81,9 @@ def test_default_scope_matches_spec_11_2() -> None:
     so suffix conventions (``ERC20Mock``) match too. ``stub_paths`` is the
     new v0.2 field, defaulting empty.
 
-    ``**/node_modules/**`` joins the defaults because vendored npm packages are
-    never the audit target and a repo vendoring two majors of one package
-    declares the same contract name twice, which aborted the entire run with
-    "duplicate entrypoint identities". Excluding them from Flow generation does
-    not exclude them from compilation, so they remain available as call targets.
+    Vendored dependency trees are NOT here: they live in ``dependency_paths``,
+    which suppresses their Flow roots without making them ineligible as
+    explicit ``--bind`` targets the way ``exclude_paths`` does.
     """
 
     assert DEFAULT_SCOPE.exclude_paths == (
@@ -93,7 +91,6 @@ def test_default_scope_matches_spec_11_2() -> None:
         "**/test/**",
         "**/tests/**",
         "**/mocks/**",
-        "**/node_modules/**",
     )
     assert DEFAULT_SCOPE.exclude_contracts == ("*Mock*",)
     assert DEFAULT_SCOPE.inline_libraries == ()

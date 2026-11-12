@@ -59,6 +59,14 @@ class Scope:
     inline_libraries: tuple[str, ...] = ()
     stub_paths: tuple[str, ...] = ()
     interface_bindings: tuple[tuple[str, str], ...] = ()
+    # Vendored dependency trees. These produce no Flow ROOTS -- they are never
+    # the audit target, and a repo vendoring two majors of one package declares
+    # the same contract twice, which aborted the whole run with "duplicate
+    # entrypoint identities". Deliberately NOT ``exclude_paths``: that tuple
+    # also gates ``--bind`` eligibility, and a unique implementation under
+    # node_modules must stay bindable. Compilation is unaffected either way --
+    # compile_repo() takes only the repo path.
+    dependency_paths: tuple[str, ...] = ()
 
 
 # Default tuple values track spec §11.2's "Default scope" block. v0.2 broadens
@@ -68,26 +76,15 @@ class Scope:
 # already provided. ``stub_paths`` defaults empty — in-tree library stubbing
 # is the auditor's call, never assumed.
 DEFAULT_SCOPE: Scope = Scope(
-    exclude_paths=(
-        "**/*.t.sol",
-        "**/test/**",
-        "**/tests/**",
-        "**/mocks/**",
-        # Vendored npm dependencies are never the audit target, and a repo that
-        # vendors two majors of the same package (e.g. @openzeppelin/contracts
-        # and @openzeppelin/contracts-v4) declares the same contract name twice,
-        # which previously aborted the whole run with "duplicate entrypoint
-        # identities". Excluding them from Flow generation does NOT exclude them
-        # from compilation -- compile_repo() takes only the repo path -- so they
-        # remain available as call targets. ``lib/**`` is deliberately NOT
-        # defaulted: ``inline_libraries`` addresses ``lib/{name}/**`` and
-        # excluding it loses in-tree library Flows (measured: 1301 -> 1300).
-        "**/node_modules/**",
-    ),
+    exclude_paths=("**/*.t.sol", "**/test/**", "**/tests/**", "**/mocks/**"),
     exclude_contracts=("*Mock*",),
     inline_libraries=(),
     stub_paths=(),
     interface_bindings=(),
+    # ``lib/**`` is deliberately absent: ``inline_libraries`` addresses
+    # ``lib/{name}/**`` and excluding it loses in-tree library Flows
+    # (measured on fx-protocol-contracts: 1301 Flows -> 1300).
+    dependency_paths=("**/node_modules/**",),
 )
 
 
@@ -110,6 +107,18 @@ def _compile_spec(patterns: tuple[str, ...]) -> pathspec.PathSpec:
     """
 
     return pathspec.PathSpec.from_lines("gitignore", patterns)
+
+
+def dependency_path(scope: Scope, filename_relative: str) -> bool:
+    """True if ``filename_relative`` lives in a vendored dependency tree.
+
+    Used only to suppress Flow ROOTS. Unlike ``path_excluded`` this does not
+    make a contract ineligible as an explicit ``--bind`` target.
+    """
+
+    if not scope.dependency_paths:
+        return False
+    return _compile_spec(scope.dependency_paths).match_file(filename_relative)
 
 
 def path_excluded(scope: Scope, filename_relative: str) -> bool:

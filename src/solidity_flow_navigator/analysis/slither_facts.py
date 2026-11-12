@@ -8,6 +8,7 @@ binding outcomes).
 
 import logging
 import re
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -66,9 +67,15 @@ def extract_facts(
     """
 
     repo_root = Path(repo_path).resolve()
-    with _capture_analysis_diagnostics() as _diagnostics:
+    with _capture_analysis_diagnostics() as (_diagnostics, _capture_possible):
         slither = Slither(crytic_compile_obj)
-    analysis = _build_analysis_report(_diagnostics.records)
+        _structural = _incorrectly_constructed(slither)
+    analysis = _build_analysis_report(
+        _diagnostics.records,
+        repo_root,
+        capture_possible=_capture_possible,
+        structurally_incomplete=_structural,
+    )
     # This cache belongs to one analysis, rather than a process-global path.
     # Preserve the exact newlines retained by the compilation adapter: source
     # mappings are byte offsets into that input, not normalized checkout text.
@@ -101,10 +108,35 @@ def extract_facts(
 # Analysis-completeness capture
 # ---------------------------------------------------------------------------
 
-# Slither logs this and CONTINUES when IR generation for one function aborts.
-# The function is not removed -- IR is built node by node and stops partway --
-# so it survives with incomplete internals and an otherwise normal Flow.
-_IR_FAILURE_RE = re.compile(r"Impossible to generate IR for ([^\s(]+(?:\([^)]*\))?)")
+# Slither logs these and CONTINUES. It does not remove the function: IR is
+# built node by node and stops partway, so the function survives with
+# incomplete internals and an otherwise normal Flow.
+#
+# Two message shapes exist upstream. The top-level form must be matched FIRST:
+# the contract pattern would otherwise capture the literal word "top" and
+# collapse every top-level failure under one bogus identity.
+_IR_FAIL_TOPLEVEL_RE = re.compile(
+    r"Impossible to generate IR for top level function ([^\s(]+(?:\([^)]*\))?)"
+)
+_IR_FAIL_CONTRACT_RE = re.compile(
+    r"Impossible to generate IR for ([^\s(]+(?:\([^)]*\))?)"
+)
+
+# Only loggers Slither itself emits from. Collecting from the root logger made
+# any unrelated library error -- a background HTTP failure, another thread --
+# mark a valid analysis incomplete, and leaked degraded names between
+# concurrent extractions.
+_SLITHER_LOGGERS: tuple[str, ...] = (
+    "Slither",
+    "SlitherSolcParsing",
+    "ContractSolcParsing",
+    "FunctionSolc",
+    "UsingForTopLevelSolc",
+)
+
+# Serialises extractions in one process so two analyses cannot collect each
+# other's records or race on the logger levels they restore.
+_CAPTURE_LOCK = threading.Lock()
 
 
 class _DiagnosticCollector(logging.Handler):
@@ -118,44 +150,104 @@ class _DiagnosticCollector(logging.Handler):
         try:
             self.records.append(record.getMessage())
         except Exception:  # pragma: no cover - never let logging break analysis
-            pass
+            self.records.append("<unformattable analyzer diagnostic>")
 
 
 @contextmanager
 def _capture_analysis_diagnostics():
-    """Attach a collector to the root logger for the duration of the block.
+    """Capture Slither's ERROR output without mutating global logging state.
 
-    Slither emits from several logger names (``ContractSolcParsing``,
-    ``SlitherSolcParsing`` and others) and some paths log-and-continue rather
-    than raising, so the root logger is the only reliable attachment point.
+    Attaches to the named Slither loggers only, and restores each logger's
+    level, ``disabled`` and ``propagate`` exactly. The root logger is left
+    alone: raising its level changed what the host application logged, and
+    overlapping calls could restore each other's saved value.
+
+    ``capture_possible`` is False when ``logging.disable()`` is suppressing
+    ERROR globally, because then no handler can see the records. Completeness
+    must fail CLOSED in that case rather than report a clean analysis it never
+    observed.
     """
 
     collector = _DiagnosticCollector()
-    root = logging.getLogger()
-    previous_level = root.level
-    if previous_level > logging.ERROR or previous_level == logging.NOTSET:
-        root.setLevel(logging.ERROR)
-    root.addHandler(collector)
-    try:
-        yield collector
-    finally:
-        root.removeHandler(collector)
-        root.setLevel(previous_level)
+    saved: list[tuple[logging.Logger, int, bool, bool]] = []
+    capture_possible = logging.root.manager.disable < logging.ERROR
+    with _CAPTURE_LOCK:
+        for name in _SLITHER_LOGGERS:
+            logger = logging.getLogger(name)
+            saved.append((logger, logger.level, logger.disabled, logger.propagate))
+            if logger.level > logging.ERROR or logger.level == logging.NOTSET:
+                logger.setLevel(logging.ERROR)
+            logger.disabled = False
+            logger.addHandler(collector)
+        try:
+            yield collector, capture_possible
+        finally:
+            for logger, level, disabled, propagate in saved:
+                logger.removeHandler(collector)
+                logger.setLevel(level)
+                logger.disabled = disabled
+                logger.propagate = propagate
 
 
-def _build_analysis_report(messages: list[str]) -> AnalysisReport:
+def _degraded_name(message: str) -> str | None:
+    match = _IR_FAIL_TOPLEVEL_RE.search(message)
+    if match:
+        return match.group(1)
+    match = _IR_FAIL_CONTRACT_RE.search(message)
+    return match.group(1) if match else None
+
+
+def _portable(message: str, repo_root: Path) -> str:
+    """Strip host-dependent absolute paths so the hashed export stays
+    checkout-independent. Slither can log a failed reference resolution
+    carrying ``scope.filename.absolute``; two clones of one repo would then
+    hash differently for the same analysis."""
+
+    return message.replace(str(repo_root) + "/", "").replace(str(repo_root), "")
+
+
+def _build_analysis_report(
+    messages: list[str],
+    repo_root: Path | None = None,
+    *,
+    capture_possible: bool = True,
+    structurally_incomplete: tuple[str, ...] = (),
+) -> AnalysisReport:
+    root = repo_root if repo_root is not None else Path("/")
+    portable = list(dict.fromkeys(_portable(m, root) for m in messages))
     degraded: list[str] = []
-    for message in messages:
-        match = _IR_FAILURE_RE.search(message)
-        if match:
-            name = match.group(1)
-            if name not in degraded:
-                degraded.append(name)
+    for message in portable:
+        name = _degraded_name(message)
+        if name and name not in degraded:
+            degraded.append(name)
+    for name in structurally_incomplete:
+        if name not in degraded:
+            degraded.append(name)
+    if not capture_possible:
+        portable.insert(
+            0,
+            "analyzer diagnostics could not be captured "
+            "(logging.disable suppresses ERROR); completeness is unverified",
+        )
+    complete = capture_possible and not portable and not structurally_incomplete
     return AnalysisReport(
-        complete=not messages,
+        complete=complete,
         degraded_functions=tuple(degraded),
-        diagnostics=tuple(dict.fromkeys(messages)),
+        diagnostics=tuple(portable),
     )
+
+
+def _incorrectly_constructed(slither: Slither) -> tuple[str, ...]:
+    """Slither's own record of contracts it could not build properly.
+
+    Independent of log capture, so it still fires when logging is suppressed.
+    """
+
+    out: list[str] = []
+    for contract in getattr(slither, "contracts", ()):  # pragma: no branch
+        if getattr(contract, "is_incorrectly_constructed", False):
+            out.append(f"{getattr(contract, 'name', '<contract>')} <incomplete>")
+    return tuple(out)
 
 
 
