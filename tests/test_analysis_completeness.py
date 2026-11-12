@@ -601,3 +601,22 @@ def test_serve_rejects_a_binding_the_cli_treats_as_fatal() -> None:
     assert "candidates_by_iface.get(iface, ())" in handler, (
         "an unknown contract must be rejected before _rebuild commits it"
     )
+
+
+def test_one_failure_is_named_once_not_twice() -> None:
+    """Log parsing yields "C.f" and direct observation yields "C.f(uint256)"
+    for the SAME failure. Listing both makes one problem look like two, and an
+    operator counting degraded functions gets a wrong number. Found by running
+    the installed tool, not by a test."""
+    report = _build_analysis_report(
+        [REAL_IR_ERROR],
+        Path("/repo"),
+        ir_failures=("FxUSDBasePool.arbitrage(address,uint256,address,bytes): "
+                     "AttributeError: boom",),
+        structurally_incomplete=("FxUSDBasePool <incomplete>",),
+    )
+    names = report.degraded_functions
+    assert "FxUSDBasePool.arbitrage" not in names, "bare duplicate must go"
+    assert "FxUSDBasePool.arbitrage(address,uint256,address,bytes)" in names
+    assert "FxUSDBasePool <incomplete>" in names
+    assert len(names) == 2

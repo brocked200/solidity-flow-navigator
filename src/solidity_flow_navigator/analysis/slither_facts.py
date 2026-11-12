@@ -340,9 +340,22 @@ def _build_analysis_report(
     )
     return AnalysisReport(
         complete=complete,
-        degraded_functions=tuple(degraded),
+        degraded_functions=_collapse_names(degraded),
         diagnostics=tuple(portable),
     )
+
+
+def _collapse_names(names: list[str]) -> tuple[str, ...]:
+    """Drop a bare name when the same function is also named with its signature.
+
+    The same failure reaches us twice: log parsing yields "C.f" while direct
+    observation yields "C.f(uint256)". Listing both makes one problem look like
+    two, and an operator counting degraded functions gets a wrong number.
+    Prefer the signature-bearing form -- it is the more precise identity.
+    """
+
+    with_sig = {n.split("(", 1)[0] for n in names if "(" in n}
+    return tuple(n for n in names if "(" in n or n.split(" ")[0] not in with_sig)
 
 
 def _incorrectly_constructed(slither: Slither) -> tuple[str, ...]:
