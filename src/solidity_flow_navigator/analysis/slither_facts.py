@@ -6,6 +6,9 @@ Slither already computed (inheritance order, source mappings, source text,
 binding outcomes).
 """
 
+import logging
+import re
+from contextlib import contextmanager
 from pathlib import Path
 
 from crytic_compile import CryticCompile
@@ -41,6 +44,7 @@ from slither.slithir.operations import (
 )
 
 from .types import (
+    AnalysisReport,
     CallEdge,
     Contract,
     Function,
@@ -62,7 +66,9 @@ def extract_facts(
     """
 
     repo_root = Path(repo_path).resolve()
-    slither = Slither(crytic_compile_obj)
+    with _capture_analysis_diagnostics() as _diagnostics:
+        slither = Slither(crytic_compile_obj)
+    analysis = _build_analysis_report(_diagnostics.records)
     # This cache belongs to one analysis, rather than a process-global path.
     # Preserve the exact newlines retained by the compilation adapter: source
     # mappings are byte offsets into that input, not normalized checkout text.
@@ -87,7 +93,70 @@ def extract_facts(
         contracts=contracts,
         free_functions=free_functions,
         type_defs=type_defs,
+        analysis=analysis,
     )
+
+
+# ---------------------------------------------------------------------------
+# Analysis-completeness capture
+# ---------------------------------------------------------------------------
+
+# Slither logs this and CONTINUES when IR generation for one function aborts.
+# The function is not removed -- IR is built node by node and stops partway --
+# so it survives with incomplete internals and an otherwise normal Flow.
+_IR_FAILURE_RE = re.compile(r"Impossible to generate IR for ([^\s(]+(?:\([^)]*\))?)")
+
+
+class _DiagnosticCollector(logging.Handler):
+    """Collects ERROR-level records emitted by Slither during construction."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.records: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.records.append(record.getMessage())
+        except Exception:  # pragma: no cover - never let logging break analysis
+            pass
+
+
+@contextmanager
+def _capture_analysis_diagnostics():
+    """Attach a collector to the root logger for the duration of the block.
+
+    Slither emits from several logger names (``ContractSolcParsing``,
+    ``SlitherSolcParsing`` and others) and some paths log-and-continue rather
+    than raising, so the root logger is the only reliable attachment point.
+    """
+
+    collector = _DiagnosticCollector()
+    root = logging.getLogger()
+    previous_level = root.level
+    if previous_level > logging.ERROR or previous_level == logging.NOTSET:
+        root.setLevel(logging.ERROR)
+    root.addHandler(collector)
+    try:
+        yield collector
+    finally:
+        root.removeHandler(collector)
+        root.setLevel(previous_level)
+
+
+def _build_analysis_report(messages: list[str]) -> AnalysisReport:
+    degraded: list[str] = []
+    for message in messages:
+        match = _IR_FAILURE_RE.search(message)
+        if match:
+            name = match.group(1)
+            if name not in degraded:
+                degraded.append(name)
+    return AnalysisReport(
+        complete=not messages,
+        degraded_functions=tuple(degraded),
+        diagnostics=tuple(dict.fromkeys(messages)),
+    )
+
 
 
 # ---------------------------------------------------------------------------

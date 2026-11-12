@@ -68,7 +68,22 @@ class Scope:
 # already provided. ``stub_paths`` defaults empty — in-tree library stubbing
 # is the auditor's call, never assumed.
 DEFAULT_SCOPE: Scope = Scope(
-    exclude_paths=("**/*.t.sol", "**/test/**", "**/tests/**", "**/mocks/**"),
+    exclude_paths=(
+        "**/*.t.sol",
+        "**/test/**",
+        "**/tests/**",
+        "**/mocks/**",
+        # Vendored npm dependencies are never the audit target, and a repo that
+        # vendors two majors of the same package (e.g. @openzeppelin/contracts
+        # and @openzeppelin/contracts-v4) declares the same contract name twice,
+        # which previously aborted the whole run with "duplicate entrypoint
+        # identities". Excluding them from Flow generation does NOT exclude them
+        # from compilation -- compile_repo() takes only the repo path -- so they
+        # remain available as call targets. ``lib/**`` is deliberately NOT
+        # defaulted: ``inline_libraries`` addresses ``lib/{name}/**`` and
+        # excluding it loses in-tree library Flows (measured: 1301 -> 1300).
+        "**/node_modules/**",
+    ),
     exclude_contracts=("*Mock*",),
     inline_libraries=(),
     stub_paths=(),

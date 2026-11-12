@@ -8,7 +8,7 @@ Frozen + slotted: Layer 2 cannot mutate these in place, and they're cheap
 to construct in bulk on a multi-thousand-LOC repo.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +240,28 @@ class Contract:
 
 
 @dataclass(frozen=True, slots=True)
+class AnalysisReport:
+    """Completeness of the underlying Slither analysis for one extraction.
+
+    Slither logs a per-function ERROR and continues when it cannot generate IR
+    ("Impossible to generate IR for X"). It does NOT remove the function: IR is
+    built node by node and generation stops partway, so the function survives
+    with incomplete internals. Downstream that is indistinguishable from a
+    fully analysed function -- the Flow is present, the export digest is
+    printed, and nothing says the body was truncated.
+
+    This record makes that visible. ``complete`` is False whenever any
+    diagnostic was captured; ``degraded_functions`` names the functions whose
+    IR generation failed, so a consumer can mark them UNREAD and read them by
+    hand rather than trusting their edge counts as coverage.
+    """
+
+    complete: bool = True
+    degraded_functions: tuple[str, ...] = ()
+    diagnostics: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class RepoFacts:
     """Top-level Layer 1 output. Everything Layer 2 needs to build Flows.
 
@@ -259,3 +281,6 @@ class RepoFacts:
     # Defaulted so existing RepoFacts constructions (synthetic test facts) remain
     # valid (spec §10.2 / §11.3).
     type_defs: tuple[TypeDef, ...] = ()
+    # Defaulted so synthetic test facts stay valid; a default-constructed
+    # report asserts completeness, which is correct for hand-built facts.
+    analysis: AnalysisReport = field(default_factory=AnalysisReport)

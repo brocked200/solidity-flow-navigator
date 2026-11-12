@@ -176,6 +176,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     scope_group.add_argument(
+        "--allow-partial-analysis",
+        action="store_true",
+        help=(
+            "Export even when the analyzer reported errors. The export then "
+            "carries analysis.complete=false and names every degraded "
+            "function; treat those as UNREAD and read them by hand."
+        ),
+    )
+    scope_group.add_argument(
         "--exclude-path",
         action="append",
         default=None,
@@ -328,13 +337,61 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 1
 
+    # ``analysis`` is defaulted on RepoFacts and absent on the synthetic facts
+    # the CLI tests inject, so read it defensively rather than requiring it.
+    analysis = getattr(facts, "analysis", None)
+    if analysis is not None and not analysis.complete:
+        # Slither logged an error and continued. Any function it names survives
+        # with incomplete IR, so its Flow understates what the code does. That
+        # is indistinguishable from a complete analysis downstream, which is why
+        # evidence output refuses by default rather than printing a digest.
+        print(
+            "solflow: analysis incomplete — "
+            f"{len(analysis.diagnostics)} analyzer error(s)",
+            file=sys.stderr,
+        )
+        for name in analysis.degraded_functions[:20]:
+            print(f"solflow:   degraded (partial IR): {name}", file=sys.stderr)
+        extra = len(analysis.degraded_functions) - 20
+        if extra > 0:
+            print(f"solflow:   ... and {extra} more", file=sys.stderr)
+        if not getattr(args, "allow_partial_analysis", False):
+            print(
+                "solflow: refusing to emit evidence from a partial analysis; "
+                "pass --allow-partial-analysis to export anyway (the export "
+                "then records analysis.complete=false and names every "
+                "degraded function).",
+                file=sys.stderr,
+            )
+            return 1
+
     flows = build_flows(facts, scope)
 
     identities = [flow.entry_point_invoker_canonical_name for flow in flows]
     if len(set(identities)) != len(identities):
+        # Name the offenders and the files they came from: the information is
+        # already in hand, and withholding it has caused this failure to be
+        # misdiagnosed as an out-of-memory condition.
+        counts: dict[str, list[str]] = {}
+        for flow in flows:
+            location = getattr(flow.root, "source_location", None)
+            counts.setdefault(flow.entry_point_invoker_canonical_name, []).append(
+                getattr(location, "filename_relative", "<unknown file>")
+            )
+        dupes = {k: v for k, v in counts.items() if len(v) > 1}
         print(
             "solflow: duplicate entrypoint identities; exclude ambiguous "
             "same-named contracts before serving or exporting.",
+            file=sys.stderr,
+        )
+        for name, files in sorted(dupes.items())[:20]:
+            print(f"solflow:   {name} declared in {', '.join(sorted(set(files)))}",
+                  file=sys.stderr)
+        if len(dupes) > 20:
+            print(f"solflow:   ... and {len(dupes) - 20} more", file=sys.stderr)
+        print(
+            "solflow: typically vendored duplicates; retry with "
+            "--exclude-path '<dir>/**' for the tree you do not audit.",
             file=sys.stderr,
         )
         return 1

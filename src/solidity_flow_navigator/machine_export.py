@@ -70,6 +70,14 @@ def build_machine_export(
             raise ExportError("scope paths must be relative for a portable export")
     core: dict[str, Any] = {
         "tool": {"name": "solflow", "version": tool_version},
+        # Completeness of the underlying Slither analysis. Inside the hashed
+        # core on purpose: a partial analysis must not produce the same digest
+        # as a complete one over the same sources.
+        "analysis": {
+            "complete": facts.analysis.complete,
+            "degraded_functions": list(facts.analysis.degraded_functions),
+            "diagnostics": list(facts.analysis.diagnostics),
+        },
         "sources": sources,
         "source_tree_sha256": _digest_json(sources),
         "compilers": _compiler_manifest(

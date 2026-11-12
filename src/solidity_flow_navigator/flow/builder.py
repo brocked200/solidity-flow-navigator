@@ -1446,7 +1446,15 @@ def _child_identity(node: FlowNode) -> tuple:
     spaces from colliding.
     """
     if isinstance(node, FunctionNode):
-        return ("fn", node.canonical_name)
+        # The declaring file is part of the identity: a bare canonical name
+        # collides across files (the same reason Contract.uid is
+        # ``(filename_relative, name)`` per types.py / spec 11.5). Without it,
+        # two same-named contracts from different vendored trees -- e.g.
+        # ``Math.max(uint256,uint256)`` in @openzeppelin/contracts and in
+        # @openzeppelin/contracts-v4 -- produce the same identity, and when both
+        # resolve at one call statement the dedup discards an entire distinct
+        # callee subtree with no diagnostic.
+        return ("fn", node.source_location.filename_relative, node.canonical_name)
     if isinstance(node, ExternalNode):
         return ("ext", node.target_canonical_name)
     if isinstance(node, SinkNode):
