@@ -54,6 +54,10 @@ def build_machine_export(
         # Gitignore negation is order-sensitive. Canonical JSON orders keys,
         # not configuration sequences: sorting these changes their meaning.
         "exclude_paths": list(scope.exclude_paths),
+        # Must be here: this one deletes whole trees of Flow roots, so two
+        # exports differing only in it can disagree about most of the attack
+        # surface while declaring an identical scope and scope_sha256.
+        "dependency_paths": list(scope.dependency_paths),
         "exclude_contracts": list(scope.exclude_contracts),
         "inline_libraries": list(scope.inline_libraries),
         "stub_paths": list(scope.stub_paths),
@@ -62,7 +66,13 @@ def build_machine_export(
             for iface, contract in sorted(dict(scope.interface_bindings).items())
         ],
     }
-    for key in ("exclude_paths", "exclude_contracts", "inline_libraries", "stub_paths"):
+    for key in (
+        "exclude_paths",
+        "dependency_paths",
+        "exclude_contracts",
+        "inline_libraries",
+        "stub_paths",
+    ):
         if any(
             Path(p).is_absolute() or PureWindowsPath(p).is_absolute()
             for p in scope_dict[key]

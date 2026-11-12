@@ -67,14 +67,16 @@ def extract_facts(
     """
 
     repo_root = Path(repo_path).resolve()
-    with _capture_analysis_diagnostics() as (_diagnostics, _status):
-        slither = Slither(crytic_compile_obj)
-        _structural = _incorrectly_constructed(slither)
+    with _capture_ir_failures() as _ir_failures:
+        with _capture_analysis_diagnostics() as (_diagnostics, _status):
+            slither = Slither(crytic_compile_obj)
+            _structural = _incorrectly_constructed(slither)
     analysis = _build_analysis_report(
         _diagnostics.records,
         repo_root,
         capture_unverified=tuple(_status.reasons),
         structurally_incomplete=_structural,
+        ir_failures=tuple(_ir_failures),
     )
     # This cache belongs to one analysis, rather than a process-global path.
     # Preserve the exact newlines retained by the compilation adapter: source
@@ -132,6 +134,10 @@ _SLITHER_LOGGERS: tuple[str, ...] = (
     "ContractSolcParsing",
     "FunctionSolc",
     "UsingForTopLevelSolc",
+    # convert.py logs "Function not found" and continues with ir.function =
+    # None -- a call edge silently loses its target. Normal operation, not an
+    # adversarial host.
+    "ConvertToIR",
 )
 
 # Serialises extractions in one process so two analyses cannot collect each
@@ -176,6 +182,44 @@ class _DiagnosticCollector(logging.Handler):
             self.records.append(record.getMessage())
         except Exception:  # pragma: no cover - never let logging break analysis
             self.records.append("<unformattable analyzer diagnostic>")
+
+
+@contextmanager
+def _capture_ir_failures():
+    """Observe every IR-generation abort directly, not through logging.
+
+    Slither catches these at the call site, logs, and continues, so the
+    function survives with partial IR. Wrapping the one method they all go
+    through sees the failure BEFORE it is swallowed, and sees it regardless of
+    the host's logging policy -- which is the only way to close the gap where a
+    host suppresses logging for the duration of construction.
+
+    ``Function.generate_slithir_and_analyze`` has a single definition and three
+    call sites (solc contract, solc top-level, vyper), so this covers every
+    path. Top-level failures in particular flag no contract, so the structural
+    ``is_incorrectly_constructed`` cross-check cannot see them.
+    """
+
+    from slither.core.declarations.function import Function as _SlitherFunction
+
+    original = _SlitherFunction.generate_slithir_and_analyze
+    failures: list[str] = []
+
+    def _observed(self):  # type: ignore[no-untyped-def]
+        try:
+            return original(self)
+        except Exception as exc:  # re-raised: Slither's own handler still runs
+            name = getattr(self, "canonical_name", None) or getattr(
+                self, "name", "<function>"
+            )
+            failures.append(f"{name}: {type(exc).__name__}: {exc}")
+            raise
+
+    _SlitherFunction.generate_slithir_and_analyze = _observed  # type: ignore[method-assign]
+    try:
+        yield failures
+    finally:
+        _SlitherFunction.generate_slithir_and_analyze = original  # type: ignore[method-assign]
 
 
 @contextmanager
@@ -254,6 +298,7 @@ def _build_analysis_report(
     *,
     capture_unverified: tuple[str, ...] = (),
     structurally_incomplete: tuple[str, ...] = (),
+    ir_failures: tuple[str, ...] = (),
 ) -> AnalysisReport:
     root = repo_root if repo_root is not None else Path("/")
     portable = list(dict.fromkeys(_portable(m, root) for m in messages))
@@ -262,13 +307,24 @@ def _build_analysis_report(
         name = _degraded_name(message)
         if name and name not in degraded:
             degraded.append(name)
+    # Observed directly, so these are authoritative: they do not depend on any
+    # log record having been delivered.
+    for failure in ir_failures:
+        name = failure.split(":", 1)[0]
+        if name not in degraded:
+            degraded.append(name)
     for name in structurally_incomplete:
         if name not in degraded:
             degraded.append(name)
+    for failure in ir_failures:
+        portable.append(f"IR generation aborted: {_portable(failure, root)}")
     for reason in capture_unverified:
         portable.insert(0, f"completeness unverified: {reason}")
     complete = (
-        not capture_unverified and not portable and not structurally_incomplete
+        not capture_unverified
+        and not portable
+        and not structurally_incomplete
+        and not ir_failures
     )
     return AnalysisReport(
         complete=complete,

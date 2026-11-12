@@ -482,3 +482,88 @@ def test_dependency_paths_can_be_cleared_and_extended_from_config() -> None:
 
     untouched = apply_partial(DEFAULT_SCOPE, PartialScope())
     assert untouched.dependency_paths == DEFAULT_SCOPE.dependency_paths
+
+
+def test_ir_failures_are_seen_even_with_logging_fully_disabled() -> None:
+    """The gap the previous two rounds could not close: a host that suppresses
+    logging for the whole of Slither(cc). Direct observation of the abort does
+    not care about logging policy at all."""
+    from solidity_flow_navigator.analysis.slither_facts import _capture_ir_failures
+    from slither.core.declarations.function import Function as SlitherFunction
+
+    class _Node:
+        def slithir_generation(self):
+            # the real upstream failure, verbatim
+            raise AttributeError("'NoneType' object has no attribute 'parameters'")
+
+    # Duck-typed rather than subclassed: Function is abstract, and the real
+    # method only touches self.nodes before failing, so this exercises the
+    # genuine path through the wrapped method.
+    victim = SimpleNamespace(
+        canonical_name="Top.scale(uint256,uint256)", nodes=[_Node()]
+    )
+
+    logging.disable(logging.CRITICAL)
+    try:
+        with _capture_ir_failures() as failures:
+            try:
+                SlitherFunction.generate_slithir_and_analyze(victim)
+            except AttributeError:
+                pass  # Slither's own handler swallows it the same way
+    finally:
+        logging.disable(logging.NOTSET)
+
+    assert failures, "an IR abort must be observed with logging fully disabled"
+    assert failures[0].startswith("Top.scale(uint256,uint256):")
+
+    report = _build_analysis_report(
+        [], Path("/repo"), ir_failures=tuple(failures)
+    )
+    assert report.complete is False
+    assert "Top.scale(uint256,uint256)" in report.degraded_functions
+
+
+def test_the_wrap_is_removed_afterwards() -> None:
+    from solidity_flow_navigator.analysis.slither_facts import _capture_ir_failures
+    from slither.core.declarations.function import Function as SlitherFunction
+
+    before = SlitherFunction.generate_slithir_and_analyze
+    with _capture_ir_failures():
+        assert SlitherFunction.generate_slithir_and_analyze is not before
+    assert SlitherFunction.generate_slithir_and_analyze is before
+
+
+def test_convert_to_ir_logger_is_audited() -> None:
+    """convert.py logs "Function not found" and continues with
+    ir.function = None, losing a call edge's target in normal operation."""
+    from solidity_flow_navigator.analysis.slither_facts import _SLITHER_LOGGERS
+
+    assert "ConvertToIR" in _SLITHER_LOGGERS
+    with _capture_analysis_diagnostics() as (collector, _status):
+        logging.getLogger("ConvertToIR").error("Function not found Foo.bar")
+    assert collector.records == ["Function not found Foo.bar"]
+
+
+def test_export_scope_carries_dependency_paths(tmp_path) -> None:
+    """dependency_paths deletes whole trees of Flow roots. Omitting it from the
+    exported scope let two artifacts disagreeing about most of the attack
+    surface declare an identical scope and scope_sha256."""
+    import dataclasses
+
+    from solidity_flow_navigator.machine_export import build_machine_export
+    from tests.test_machine_export import _analysis as _export_fixture
+
+    facts, flows, scope, compilation = _export_fixture(tmp_path / "repo")
+    wide = build_machine_export(facts, flows, scope, compilation, tool_version="t")
+    narrow_scope = dataclasses.replace(
+        scope, dependency_paths=scope.dependency_paths + ("contracts/core/**",)
+    )
+    narrow = build_machine_export(
+        facts, flows, narrow_scope, compilation, tool_version="t"
+    )
+
+    assert "dependency_paths" in wide["scope"]
+    assert wide["scope"] != narrow["scope"]
+    assert wide["scope_sha256"] != narrow["scope_sha256"], (
+        "a scope rule that changes which roots exist must change the scope hash"
+    )
