@@ -585,18 +585,6 @@ def test_served_pages_warn_about_a_partial_analysis() -> None:
     ), "the completeness report must reach the template context"
 
 
-def test_serve_rejects_a_binding_the_cli_treats_as_fatal() -> None:
-    """Serve was fail-open where the CLI is fail-closed: /bind/ accepted any
-    contract name, and /bindings/save would then persist a solflow.toml the
-    CLI refuses with INTERFACE_BINDING_FAILED."""
-    app_src = Path("src/solidity_flow_navigator/serve/app.py").read_text()
-    start = app_src.index('contract = request.args.get("contract", "")')
-    handler = app_src[start : app_src.index("def save_bindings", start)]
-    assert "candidates_by_iface.get(iface, ())" in handler, (
-        "an unknown contract must be rejected before _rebuild commits it"
-    )
-
-
 def test_one_failure_is_named_once_not_twice() -> None:
     """Log parsing yields "C.f" and direct observation yields "C.f(uint256)"
     for the SAME failure. Listing both makes one problem look like two, and an

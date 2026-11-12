@@ -39,8 +39,8 @@ from markupsafe import Markup
 from ..analysis.types import RepoFacts
 from ..flow.builder import build_flows
 from ..flow.config import ConfigError, save_interface_bindings_to_toml
-from ..flow.scope import DEFAULT_SCOPE, Scope
-from ..flow.types import Flow, FlowNode, FunctionNode
+from ..flow.scope import DEFAULT_SCOPE, Scope, contract_excluded, path_excluded
+from ..flow.types import Flow, FlowNode, FunctionNode, UnresolvedReason
 from .highlight import highlight_signature, write_pygments_css
 from .serializer import serialize_flow
 
@@ -465,7 +465,11 @@ def _implemented_signatures(facts: RepoFacts) -> dict[str, frozenset[str]]:
             base = by_name.get(cn)
             if base is None:
                 continue
-            sigs.update(f.full_name for f in base.functions if f.is_implemented)
+            sigs.update(
+                f.full_name
+                for f in base.functions
+                if f.is_implemented and f.visibility in ("public", "external")
+            )
         out[contract.name] = frozenset(sigs)
     return out
 
@@ -488,7 +492,10 @@ def _interface_methods(facts: RepoFacts, iface: str) -> frozenset[str]:
 
 
 def _candidate_contracts(
-    facts: RepoFacts, iface: str, impl_sigs: dict[str, frozenset[str]]
+    facts: RepoFacts,
+    iface: str,
+    impl_sigs: dict[str, frozenset[str]],
+    scope: Scope = DEFAULT_SCOPE,
 ) -> tuple[str, ...]:
     """Concrete contracts that could implement ``iface`` (§13.2): those that
     explicitly inherit it, plus those that structurally implement ALL of its
@@ -506,7 +513,26 @@ def _candidate_contracts(
         if methods
         else set()
     )
-    return tuple(sorted(explicit | structural))
+    in_scope = {
+        contract.name
+        for contract in facts.contracts
+        if not contract_excluded(scope, contract.name)
+        and not path_excluded(scope, contract.source_location.filename_relative)
+    }
+    return tuple(sorted((explicit | structural) & in_scope))
+
+
+def _check_binding_failures(flows: Iterable[Flow]) -> None:
+    """Apply the CLI's fatal binding check to every node in proposed flows."""
+    pending = [flow.root for flow in flows]
+    failures: set[str] = set()
+    while pending:
+        node = pending.pop()
+        if getattr(node, "reason", None) == UnresolvedReason.INTERFACE_BINDING_FAILED:
+            failures.add(node.descriptor)
+        pending.extend(getattr(node, "children", ()))
+    if failures:
+        raise ValueError("binding failed: " + "; ".join(sorted(failures)))
 
 
 def create_app(
@@ -561,13 +587,14 @@ def create_app(
     app.jinja_env.filters["anchor_slug"] = _anchor_slug
 
     # v0.17.0 (§13.2): candidate contracts per interface for the Flow-page bind
-    # dropdown. Depends only on the (immutable) facts, so compute once.
+    # dropdown. Facts and scope exclusions are fixed for this session.
     # ``_iface_sites`` (interface → high-level call-site count) is retained for
     # the v0.18.0 index Bindings panel, which shows the count per row (§8.3).
     _impl_sigs = _implemented_signatures(facts)
     _iface_sites = _interface_call_sites(facts)
     candidates_by_iface: dict[str, tuple[str, ...]] = {
-        iface: _candidate_contracts(facts, iface, _impl_sigs) for iface in _iface_sites
+        iface: _candidate_contracts(facts, iface, _impl_sigs, scope)
+        for iface in _iface_sites
     }
 
     # v0.17.0 (§13.2): the binding map is the one Scope field editable at
@@ -589,22 +616,35 @@ def create_app(
         nonlocal total_eps, total_contracts, total_unresolved
         nonlocal entry_by_url_id, contract_by_name
         these = prebuilt if prebuilt is not None else build_flows(facts, active_scope)
+        _check_binding_failures(these)
         identities = [f.entry_point_invoker_canonical_name for f in these]
         if len(identities) != len(set(identities)):
             raise ValueError("ambiguous Flow identity: duplicate entry-point name")
-        current_scope = active_scope
-        flow_by_url_id = {f.entry_point_invoker_canonical_name: f for f in these}
-        groups, total_eps, total_contracts, total_unresolved = build_index(facts, these)
-        entry_by_url_id = {}
-        contract_by_name = {}
-        for _group in groups:
+        next_groups, next_eps, next_contracts, next_unresolved = build_index(
+            facts, these
+        )
+        next_entries: dict[str, _EntryPointEntry] = {}
+        next_contracts_by_name: dict[str, _ContractEntry] = {}
+        for _group in next_groups:
             for _contract in _group.contracts:
-                contract_by_name[_contract.name] = _contract
+                next_contracts_by_name[_contract.name] = _contract
                 for _ep in (
                     *_contract.mutating_entry_points,
                     *_contract.read_only_entry_points,
                 ):
-                    entry_by_url_id[_ep.url_id] = _ep
+                    next_entries[_ep.url_id] = _ep
+        # Publish only after validation and every derived view succeeds. A
+        # rejected proposal must leave the previous scope and flows intact.
+        current_scope = active_scope
+        flow_by_url_id = {f.entry_point_invoker_canonical_name: f for f in these}
+        groups = next_groups
+        total_eps, total_contracts, total_unresolved = (
+            next_eps,
+            next_contracts,
+            next_unresolved,
+        )
+        entry_by_url_id = next_entries
+        contract_by_name = next_contracts_by_name
 
     # Seed from the flows the CLI already built with this same scope (avoids a
     # redundant startup build_flows). Subsequent binding changes rebuild live.
@@ -794,21 +834,22 @@ def create_app(
         # local path) — the Flow reloads with the node resolved.
         iface = urllib.parse.unquote(iface)
         contract = request.args.get("contract", "")
-        # Fail CLOSED, as the CLI does. cli.py aborts the whole run on
-        # INTERFACE_BINDING_FAILED, so accepting an unknown contract here would
-        # let the browser persist (via /bindings/save) a solflow.toml that the
-        # CLI then refuses -- and the failure is invisible in every aggregate
-        # the UI shows, because the failed binding replaces an UnresolvedNode
-        # that was already unresolved for another reason. flow/types.py states
-        # the intent: a wrong or typo'd binding is a loud error, never a silent
-        # fall-back.
-        if contract and contract != "__none__":
-            if contract not in candidates_by_iface.get(iface, ()):
-                return redirect(_safe_next(request.args.get("next")) + "?bind=error")
         pairs = [(i, c) for (i, c) in current_scope.interface_bindings if i != iface]
         if contract and contract != "__none__":
             pairs.append((iface, contract))
-        _rebuild(replace(current_scope, interface_bindings=tuple(pairs)))
+        # Candidates improve the dropdown; only the built flows determine
+        # validity, using the same INTERFACE_BINDING_FAILED gate as the CLI.
+        try:
+            _rebuild(replace(current_scope, interface_bindings=tuple(pairs)))
+        except ValueError as exc:
+            app.logger.warning("could not change binding for %s: %s", iface, exc)
+            target = urllib.parse.urlsplit(_safe_next(request.args.get("next")))
+            query = urllib.parse.parse_qsl(target.query) + [("bind", "error")]
+            return redirect(
+                urllib.parse.urlunsplit(
+                    target._replace(query=urllib.parse.urlencode(query))
+                )
+            )
         return redirect(_safe_next(request.args.get("next")))
 
     @app.route("/bindings/save", methods=["POST"])
@@ -823,8 +864,12 @@ def create_app(
         # index panel.
         target = config_path if config_path is not None else Path.cwd() / "solflow.toml"
         try:
+            # Direct create_app callers may supply a scope independently of
+            # prebuilt flows. Rebuild to verify the set being persisted rather
+            # than assuming every binding passed through /bind/.
+            _check_binding_failures(build_flows(facts, current_scope))
             save_interface_bindings_to_toml(target, current_scope.interface_bindings)
-        except (ConfigError, OSError) as exc:
+        except (ConfigError, OSError, ValueError) as exc:
             app.logger.warning("could not save bindings to %s: %s", target, exc)
             return redirect("/?saved=error#bindings")
         return redirect("/?saved=ok#bindings")
