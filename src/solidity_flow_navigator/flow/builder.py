@@ -741,6 +741,7 @@ class _FlowBuilder:
                 raw_kind=edge.kind,
                 raw_subkind=edge.subkind,
                 value_expression=edge.value_expression,
+                is_self_call=edge.is_self_call,
             )
         if kind == "internal_dynamic":
             return UnresolvedNode(

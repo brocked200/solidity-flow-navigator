@@ -170,6 +170,9 @@ class UnresolvedNode:
     raw_subkind: str | None
     # Native value attached to an opaque call, when Slither exposes one.
     value_expression: str | None = None
+    # Receiver syntax can establish a self-call without resolving its calldata.
+    # None retains compatibility with facts that do not carry receiver metadata.
+    is_self_call: bool | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True, slots=True)

@@ -25,8 +25,10 @@ from slither.core.expressions.call_expression import CallExpression
 from slither.core.expressions.identifier import Identifier
 from slither.core.expressions.member_access import MemberAccess
 from slither.core.expressions.super_call_expression import SuperCallExpression
+from slither.core.expressions.type_conversion import TypeConversion
 from slither.core.solidity_types import (
     ArrayType,
+    ElementaryType,
     MappingType,
     TypeAlias,
     UserDefinedType,
@@ -588,6 +590,22 @@ def _is_entry_point(f: SlitherFunction, *, is_modifier: bool) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _is_self_receiver(receiver) -> bool:
+    """Recognize literal ``this`` through explicit address/payable casts only."""
+    while isinstance(receiver, TypeConversion):
+        if not isinstance(receiver.type, ElementaryType) or str(receiver.type) not in {
+            "address",
+            "address payable",
+        }:
+            return False
+        receiver = receiver.expression
+    return (
+        isinstance(receiver, Identifier)
+        and isinstance(receiver.value, SolidityVariable)
+        and receiver.value.name == "this"
+    )
+
+
 def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
     """Translate a SlithIR operation into a CallEdge, or None for non-call ops."""
 
@@ -613,6 +631,7 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
             is_static_call=False,
         )
     if isinstance(op, LowLevelCall):
+        called = getattr(op.expression, "called", None)
         return CallEdge(
             kind="low_level",
             subkind=str(op.function_name) if op.function_name is not None else None,
@@ -623,7 +642,10 @@ def _call_edge(op: Operation, repo_root: Path) -> CallEdge | None:
             source_location=_op_location(op, repo_root),
             value_expression=_value_expression(op),
             is_super_call=False,
-            is_self_call=False,
+            is_self_call=(
+                isinstance(called, MemberAccess)
+                and _is_self_receiver(called.expression)
+            ),
             is_static_call=False,
         )
     if isinstance(op, SolidityCall):
