@@ -21,6 +21,7 @@ from slither.core.declarations import FunctionContract
 from slither.core.declarations import Modifier as SlitherModifier
 from slither.core.declarations import Structure as SlitherStructure
 from slither.core.declarations.solidity_variables import SolidityVariable
+from slither.core.expressions.call_expression import CallExpression
 from slither.core.expressions.identifier import Identifier
 from slither.core.expressions.member_access import MemberAccess
 from slither.core.expressions.super_call_expression import SuperCallExpression
@@ -1136,10 +1137,63 @@ def _compiler_source_columns(sm) -> tuple[int, int] | None:
 
 
 def _op_location(op: Operation, repo_root: Path) -> SourceLocation:
-    # SlithIR operations carry their location via the parent CFG node. For
-    # multi-call statements the same node-level location is reused for each
-    # contained call; that's an acceptable v0 fidelity loss.
-    return _source_location(op.node.source_mapping, repo_root)
+    """Use the originating call expression, with the CFG statement as fallback.
+
+    Several calls in one statement share a node mapping. Their expression
+    spans distinguish genuine calls while keeping copies of one expression
+    emitted on multiple CFG branches identical for downstream deduplication.
+    """
+    statement = op.node.source_mapping
+    expression = _call_expression_mapping(op, statement)
+    return _source_location(
+        expression if expression is not None else statement, repo_root
+    )
+
+
+def _call_expression_mapping(op: Operation, statement):
+    """Return a usable expression mapping without guessing synthetic locations."""
+    expression = getattr(op, "expression", None)
+    # Includes SuperCallExpression. Non-call pseudo-operations (e.g. balance
+    # and code builtins) and legacy IR without expression metadata retain the
+    # statement mapping rather than acquiring an invented call identity.
+    if not isinstance(expression, CallExpression):
+        return None
+    mapping = getattr(expression, "source_mapping", None)
+    try:
+        filename = mapping.filename.absolute
+        if not isinstance(filename, str) or not filename:
+            return None
+        if filename != statement.filename.absolute:
+            return None
+        start, length = mapping.start, mapping.length
+        node_start, node_length = statement.start, statement.length
+        if any(
+            type(value) is not int for value in (start, length, node_start, node_length)
+        ):
+            return None
+        if start < 0 or length <= 0 or node_start < 0 or node_length <= 0:
+            return None
+        end, node_end = start + length, node_start + node_length
+        if start < node_start or end > node_end:
+            return None
+
+        source = _compiler_source_bytes(mapping)
+        node_source = _compiler_source_bytes(statement)
+        if node_source is not None and (source is None or source != node_source):
+            return None
+        if source is not None:
+            if node_end > len(source):
+                return None
+            # Reject a mapping splitting a UTF-8 code point, rather than
+            # silently computing columns for a fragment of another token.
+            source[start:end].decode("utf-8")
+        else:
+            # Virtual/legacy sources without a retained snapshot must still
+            # provide the coordinates consumed by _source_location.
+            _ = tuple(mapping.lines), mapping.starting_column, mapping.ending_column
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return mapping
 
 
 # Make linter happy about unused symbols imported only for isinstance checks.
