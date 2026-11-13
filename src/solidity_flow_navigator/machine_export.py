@@ -412,6 +412,7 @@ def _walk_edges(
                     "raw_kind": child.raw_kind,
                     "raw_subkind": child.raw_subkind,
                     "value_expression": child.value_expression,
+                    "is_self_call": child.is_self_call,
                     "call_site": _sanitize(asdict(child.call_site), aliases),
                 }
             )

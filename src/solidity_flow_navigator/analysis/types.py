@@ -110,7 +110,10 @@ class CallEdge:
     # NOT the runtime impl - that's Layer 2's job.
     target_contract_name: str | None
     is_resolved: bool  # see docstring above for meaning per-kind
-    source_location: SourceLocation  # location of the call site (statement-level)
+    # Originating CallExpression span when valid, otherwise the enclosing
+    # CFG statement. Distinct expressions in one statement have distinct byte
+    # ranges; copies of one expression across CFG branches share a range.
+    source_location: SourceLocation
     # Native-value expression attached to the call, when Slither exposes one.
     # Kept as source-adjacent display text rather than an interpreted amount:
     # the expression may be a local variable or an SSA temporary.  Defaulted

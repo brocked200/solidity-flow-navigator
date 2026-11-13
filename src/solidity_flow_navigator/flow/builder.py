@@ -741,6 +741,7 @@ class _FlowBuilder:
                 raw_kind=edge.kind,
                 raw_subkind=edge.subkind,
                 value_expression=edge.value_expression,
+                is_self_call=edge.is_self_call,
             )
         if kind == "internal_dynamic":
             return UnresolvedNode(
@@ -1427,11 +1428,10 @@ def _edge_mapping_key(edge: CallEdge) -> tuple:
     """Finest-granularity source-mapping key for the v0.10.2 CFG-branch dedup
     in ``_FlowBuilder._process_calls``.
 
-    Prefers ``(start, length)`` — the byte offset and length of the call
-    statement, what Slither's source_mapping carries when crytic-compile
-    produced byte-accurate source maps (the live case on Foundry projects,
-    confirmed by docs/probes/v0_10_2_stage1_swap_double_emit_probe.py:
-    PoolManager.swap's _swap edges both carry start=10157 length=475).
+    Prefers ``(start, length)`` — the compiler-input byte span of the
+    originating CallExpression, or the CFG statement when expression metadata
+    is unavailable/invalid. Distinct expressions in one statement therefore
+    remain distinct; copies of one expression on CFG branches still collapse.
     Falls back to the ``lines`` tuple only if either component is missing,
     so any future CallEdge whose mapping is line-only still deduplicates
     correctly.
